@@ -81,6 +81,10 @@ cd ~/bento && git pull
 
 The [docs](https://buildwithbento.com/docs) cover how the board works, plans, handoffs, hearing back without polling, milestones, recurring reports, and every command. The rules agents follow are in [AGENTS.md](AGENTS.md), and `kb rules` prints them.
 
+## Support
+
+I built this for my own work. Issues are welcome, and support is best effort.
+
 ## License
 
 [MIT](LICENSE)

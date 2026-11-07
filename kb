@@ -1370,6 +1370,8 @@ def cmd_connect(args):
     if not os.path.isdir(path):
         raise KbError("No folder at %s." % path)
     root = repo_root(path) or path
+    if root in (os.path.realpath(os.path.expanduser("~")), os.path.abspath(os.sep)):
+        raise KbError("%s is too broad to be a project. Connect a project folder instead." % root)
     name = slug(args.name or os.path.basename(root)).strip("-")
     if not name:
         raise KbError("Pass a project name with --name.")
