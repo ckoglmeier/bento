@@ -1,0 +1,2009 @@
+#!/usr/bin/env python3
+"""kb: Bento's command line. A kanban board and product docs in plain Markdown, shared by people and agents."""
+from __future__ import annotations
+
+import argparse
+import contextlib
+import datetime
+import fcntl
+import hashlib
+import http.server
+import json
+import os
+import re
+import select
+import shutil
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import urllib.parse
+import urllib.request
+import webbrowser
+
+HERE = os.path.dirname(os.path.realpath(__file__))
+POINTER = os.path.expanduser("~/.config/bento/home")
+DEFAULT_HOME = os.path.expanduser("~/.bento")
+COLUMNS = ["Scratchpad", "Milestones", "Backlog", "Next", "Doing", "Review", "Done"]
+KINDS = ["implementation", "testing", "release", "writing"]
+DATED_KINDS = ["milestone", "release"]  # Only these go on the calendar.
+DOC_SUFFIXES = (".md", ".markdown", ".mdx")
+BLOCK_START = "<!-- bento:start -->"
+BLOCK_END = "<!-- bento:end -->"
+
+H2 = re.compile(r"^## +(.+?)\s*$")
+H3 = re.compile(r"^### +(?:#(\d+)\s+)?(.+?)\s*$")
+FIELD = re.compile(r"^- ([a-z][a-z -]*): ?(.*)$")
+ROOT_DOC = re.compile(r"^(BACKLOG|ROADMAP|CHANGELOG|PRD|RELEASE|TEST-PLAN)[^/]*\.mdx?$", re.I)
+
+
+class KbError(Exception):
+    pass
+
+
+class Conflict(KbError):
+    pass
+
+
+CTX = threading.local()  # CTX.actor: who is making this change
+SERVICE_LABEL = "dev.bento.board"
+
+
+def today():
+    return datetime.date.today().isoformat()
+
+
+def one_line(text):
+    return " ".join(str(text).split())
+
+
+def slug(text):
+    """Heading anchor; board.html computes the same value."""
+    return re.sub(r"\s", "-", re.sub(r"[^a-z0-9 _-]", "", re.sub(r"[*_`]", "", text).strip().lower()))
+
+
+# ---- Workspace --------------------------------------------------------------
+
+
+def home_dir():
+    if os.environ.get("BENTO_HOME"):
+        return os.path.realpath(os.path.expanduser(os.environ["BENTO_HOME"]))
+    if os.path.exists(POINTER):
+        with open(POINTER, encoding="utf-8") as f:
+            return os.path.realpath(os.path.expanduser(f.read().strip()))
+    return os.path.realpath(DEFAULT_HOME)
+
+
+def board_path():
+    return os.path.join(home_dir(), "BOARD.md")
+
+
+def archive_path():
+    return os.path.join(home_dir(), "ARCHIVE.md")
+
+
+def trash_path():
+    return os.path.join(home_dir(), "TRASH.md")
+
+
+def config_path():
+    return os.path.join(home_dir(), "bento.json")
+
+
+def read_config():
+    try:
+        with open(config_path(), encoding="utf-8") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {"owner": "me", "projects": {}}
+
+
+def write_config(config):
+    atomic_write(config_path(), json.dumps(config, indent=2, sort_keys=True) + "\n")
+
+
+def owner():
+    return read_config().get("owner", "me")
+
+
+# ---- Connected projects -----------------------------------------------------
+
+
+def git_env():
+    """On macOS, prefer the Command Line Tools, so an unaccepted Xcode license can't break git."""
+    env = dict(os.environ)
+    tools = "/Library/Developer/CommandLineTools"
+    if sys.platform == "darwin" and "DEVELOPER_DIR" not in env and os.path.isdir(tools):
+        env["DEVELOPER_DIR"] = tools
+    return env
+
+
+def git(path, *args):
+    try:
+        out = subprocess.run(["git", "-C", path] + list(args), capture_output=True, text=True, timeout=120, env=git_env())
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return out.stdout.strip() if out.returncode == 0 else None
+
+
+def normalize_remote(url):
+    if not url:
+        return None
+    url = re.sub(r"^[a-z+]+://", "", url.strip())
+    url = re.sub(r"^[^@/]+@", "", url)
+    url = url.replace(":", "/")
+    return re.sub(r"(\.git)?/?$", "", url).lower()
+
+
+def repo_root(path):
+    """The main checkout of the repo at path, even when path is a worktree."""
+    common = git(path, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    return os.path.dirname(os.path.realpath(common)) if common else None
+
+
+def detect_project(path=None):
+    """Which connected project is this folder in? Git remote first, so every worktree matches."""
+    path = os.path.realpath(path or os.getcwd())
+    projects = read_config().get("projects", {})
+    remote = normalize_remote(git(path, "remote", "get-url", "origin"))
+    if remote:
+        for name, info in projects.items():
+            if info.get("remote") == remote:
+                return name
+    for name, info in projects.items():
+        for root in info.get("paths", []):
+            if path == root or path.startswith(root + os.sep):
+                return name
+    return None
+
+
+def default_branch(path):
+    ref = git(path, "symbolic-ref", "-q", "--short", "refs/remotes/origin/HEAD")
+    if ref:
+        return ref
+    for candidate in ("origin/main", "origin/master", "main", "master"):
+        if git(path, "rev-parse", "-q", "--verify", candidate):
+            return candidate
+    return None
+
+
+def import_docs(name, path, fetch=True):
+    """Snapshot a repo's docs from its default branch, so worktree and feature-branch copies don't matter."""
+    if fetch:
+        git(path, "fetch", "origin", "--quiet")
+    ref = default_branch(path)
+    if not ref:
+        raise KbError("%s has no default branch to import docs from." % path)
+    listing = git(path, "ls-tree", "-r", "--name-only", ref) or ""
+    files = [
+        f for f in listing.splitlines()
+        if (f.startswith("docs/") and f.lower().endswith(DOC_SUFFIXES)) or ROOT_DOC.match(f)
+    ]
+    dest = os.path.join(home_dir(), "products", name)
+    for rel in files:
+        out = subprocess.run(["git", "-C", path, "show", "%s:%s" % (ref, rel)], capture_output=True, env=git_env())
+        if out.returncode:
+            continue
+        target = os.path.join(dest, rel)
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        with open(target, "wb") as f:
+            f.write(out.stdout)
+    os.makedirs(dest, exist_ok=True)
+    commit = git(path, "rev-parse", "--short", ref)
+    atomic_write(
+        os.path.join(dest, "SOURCE.md"),
+        "# Source\n\nImported %d docs on %s from `%s` at `%s` (%s).\n" % (len(files), today(), ref, commit, path),
+    )
+    return len(files)
+
+
+def resolve_doc(path, project=None):
+    """Turn a doc reference into a workspace-relative path, keeping any #anchor. Refuses paths outside the workspace."""
+    file_part, _, anchor = path.partition("#")
+    home = home_dir()
+    candidates = [file_part]
+    if project:
+        candidates += [os.path.join("products", project, file_part), os.path.join("products", project, "docs", file_part)]
+    for candidate in candidates:
+        full = os.path.realpath(os.path.join(home, os.path.expanduser(candidate)))
+        if full.startswith(home + os.sep) and full.lower().endswith(DOC_SUFFIXES) and os.path.isfile(full):
+            return os.path.relpath(full, home) + ("#" + anchor if anchor else "")
+    raise KbError("No doc at '%s' in the workspace. Run: kb docs" % path)
+
+
+def list_docs(project=None):
+    """Connected projects and their docs, with plans first and the main planning docs next."""
+    config = read_config()
+    root = os.path.join(home_dir(), "products")
+    names = set(config.get("projects", {}))
+    if os.path.isdir(root):
+        names |= {n for n in os.listdir(root) if os.path.isdir(os.path.join(root, n))}
+    if project:
+        names &= {project}
+
+    def rank(rel):
+        base = os.path.basename(rel).upper()
+        for i, word in enumerate(("BACKLOG", "ROADMAP", "RELEASE", "TEST-PLAN")):
+            if base.startswith(word):
+                return (i, rel)
+        return (9, rel)
+
+    result = []
+    for name in sorted(names):
+        plans, docs = [], []
+        for folder, _, files in os.walk(os.path.join(root, name)):
+            for filename in files:
+                if filename.lower().endswith(DOC_SUFFIXES) and filename != "SOURCE.md":
+                    rel = os.path.relpath(os.path.join(folder, filename), home_dir())
+                    (plans if os.sep + "plans" + os.sep + filename in rel and rel.split(os.sep)[2] == "plans" else docs).append(rel)
+        result.append({"name": name, "plans": sorted(plans), "docs": sorted(docs, key=rank)})
+    return result
+
+
+# ---- Board file -------------------------------------------------------------
+
+
+class Card:
+    def __init__(self, id, title, lines=None):
+        self.id, self.title, self.lines = id, title, lines or []
+
+    def _field_count(self):
+        count = 0
+        for line in self.lines:
+            if not FIELD.match(line):
+                break
+            count += 1
+        return count
+
+    def fields(self):
+        return {m.group(1): m.group(2) for m in map(FIELD.match, self.lines[: self._field_count()])}
+
+    def get(self, key):
+        return self.fields().get(key)
+
+    def set(self, key, value):
+        count = self._field_count()
+        for i in range(count):
+            if FIELD.match(self.lines[i]).group(1) == key:
+                if value is None:
+                    del self.lines[i]
+                else:
+                    self.lines[i] = "- %s: %s" % (key, one_line(value))
+                return
+        if value is not None:
+            self.lines.insert(count, "- %s: %s" % (key, one_line(value)))
+
+    def note(self, text, who=None):
+        if self.lines and self._field_count() == len(self.lines):
+            self.lines.append("")
+        prefix = "%s %s" % (today(), who) if who else today()
+        self.lines.append("- %s: %s" % (prefix, one_line(text)))
+
+    def numbers(self, key):
+        return [int(n) for n in re.findall(r"\d+", self.get(key) or "")]
+
+    def markdown(self):
+        return "\n".join(["### #%d %s" % (self.id, self.title)] + self.lines)
+
+
+class Section:
+    def __init__(self, name):
+        self.name, self.intro, self.cards = name, [], []
+
+
+class Board:
+    def __init__(self):
+        self.preamble, self.sections = [], []
+
+    def column(self, name):
+        name = "Scratchpad" if name.lower() == "desk" else name
+        for section in self.sections:
+            if section.name.lower() == name.lower():
+                return section
+        raise KbError("No column called '%s'. Columns: %s" % (name, ", ".join(s.name for s in self.sections)))
+
+    def find(self, id):
+        for section in self.sections:
+            for card in section.cards:
+                if card.id == id:
+                    return section, card
+        raise KbError("No card #%s on the board." % id)
+
+    def all_cards(self):
+        return [(s, c) for s in self.sections for c in s.cards]
+
+    def next_id(self):
+        highest = max([c.id or 0 for _, c in self.all_cards()] + [0])
+        for path in (archive_path(), trash_path()):
+            if os.path.exists(path):
+                with open(path, encoding="utf-8") as f:
+                    highest = max([highest] + [int(n) for n in re.findall(r"^### #(\d+)", f.read(), re.M)])
+        return highest + 1
+
+    def serialize(self):
+        out = list(self.preamble)
+        while out and not out[-1].strip():
+            out.pop()
+        out.append("")
+        for section in self.sections:
+            out += ["## " + section.name, ""]
+            if section.intro:
+                out += section.intro + [""]
+            for card in section.cards:
+                out += card.markdown().split("\n") + [""]
+        return "\n".join(out).rstrip("\n") + "\n"
+
+
+def trim(lines):
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    while lines and not lines[-1].strip():
+        lines.pop()
+    return lines
+
+
+def parse(text):
+    board = Board()
+    section = card = None
+    fenced = False
+    for line in text.splitlines():
+        if line.lstrip().startswith("```"):
+            fenced = not fenced
+        if not fenced:
+            m = H2.match(line)
+            if m:
+                # "Desk" was this column's earlier name.
+                section, card = Section("Scratchpad" if m.group(1).lower() == "desk" else m.group(1)), None
+                board.sections.append(section)
+                continue
+            m = H3.match(line)
+            if m and section:
+                card = Card(int(m.group(1)) if m.group(1) else None, m.group(2))
+                section.cards.append(card)
+                continue
+        if card:
+            card.lines.append(line)
+        elif section:
+            section.intro.append(line)
+        else:
+            board.preamble.append(line)
+
+    for section in board.sections:
+        trim(section.intro)
+        for c in section.cards:
+            trim(c.lines)
+
+    # Keep the standard columns in order; any extra columns follow them.
+    known = {s.name.lower(): s for s in board.sections}
+    extras = [s for s in board.sections if s.name.lower() not in {c.lower() for c in COLUMNS}]
+    board.sections = [known.get(c.lower()) or Section(c) for c in COLUMNS] + extras
+
+    # Number hand-written cards, and renumber any accidental duplicates.
+    seen = set()
+    for _, c in board.all_cards():
+        if c.id in seen:
+            c.id = None
+        elif c.id is not None:
+            seen.add(c.id)
+    for _, c in board.all_cards():
+        if c.id is None:
+            c.id = board.next_id()
+    return board
+
+
+def load():
+    try:
+        with open(board_path(), encoding="utf-8") as f:
+            return parse(f.read())
+    except FileNotFoundError:
+        raise KbError("No board at %s. Run: kb init" % board_path())
+
+
+def atomic_write(path, text):
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".kb-")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.chmod(tmp, os.stat(path).st_mode & 0o777 if os.path.exists(path) else 0o644)
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+
+
+@contextlib.contextmanager
+def locked():
+    """Read, change and save the board while holding an exclusive lock."""
+    if not os.path.isdir(home_dir()):
+        raise KbError("No workspace at %s. Run: kb init" % home_dir())
+    with open(os.path.join(home_dir(), ".board.lock"), "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        board = load()
+        before = snapshot(board)
+        yield board
+        # Log before replacing the board: watchers wake on the replace and must find the events.
+        append_events(diff_events(before, board))
+        atomic_write(board_path(), board.serialize())
+
+
+# ---- Events and notifications -----------------------------------------------
+
+
+def events_path():
+    return os.path.join(home_dir(), "EVENTS.log")
+
+
+def snapshot(board):
+    return {c.id: (s.name.lower(), c.get("blocked"), c.get("approved")) for s, c in board.all_cards()}
+
+
+def diff_events(before, board):
+    events = []
+    for section, card in board.all_cards():
+        base = {
+            "time": int(time.time()), "id": card.id, "title": card.title,
+            "project": card.get("project"), "actor": getattr(CTX, "actor", None),
+            "session": (current_session() or {}).get("id"),
+        }
+        old = before.get(card.id)
+        if old is None:
+            events.append(dict(base, type="added", to=section.name))
+            continue
+        if old[0] != section.name.lower():
+            events.append(dict(base, type="moved", to=section.name))
+        blocked = card.get("blocked")
+        if blocked and blocked != old[1]:
+            events.append(dict(base, type="blocked", reason=blocked))
+        elif old[1] and not blocked:
+            events.append(dict(base, type="unblocked"))
+        if card.get("approved") and not old[2]:
+            events.append(dict(base, type="approved"))
+    return events
+
+
+def append_events(events):
+    if events:
+        with open(events_path(), "a", encoding="utf-8") as f:
+            f.write("".join(json.dumps(e) + "\n" for e in events))
+
+
+def describe(event):
+    """Title and message if the owner should hear about this event, else None."""
+    if (event.get("actor") or "") == owner().lower():
+        return None
+    label = "#%s %s" % (event["id"], event["title"])
+    title = "Bento" + (" · " + event["project"] if event.get("project") else "")
+    if event["type"] == "blocked":
+        return title, "%s needs you: %s" % (label, event.get("reason", ""))
+    if event["type"] == "moved" and event.get("to", "").lower() == "review":
+        return title, "%s is ready for review" % label
+    if event["type"] == "moved" and event.get("to", "").lower() == "done":
+        return title, "%s is done" % label
+    return None
+
+
+def send_notifications(events):
+    """Run the owner's optional notify command for anything worth their attention."""
+    command = read_config().get("notify", {}).get("command")
+    if not command:
+        return
+    for event in events:
+        text = describe(event)
+        if text:
+            env = dict(os.environ, BENTO_TITLE=text[0], BENTO_MESSAGE=text[1])
+            subprocess.run(["/bin/sh", "-c", command], input=json.dumps(event), text=True,
+                           env=env, capture_output=True, timeout=60)
+
+
+# ---- Waking agent sessions --------------------------------------------------
+
+
+def current_session():
+    """The harness session this command is running in, if any."""
+    if os.environ.get("CODEX_THREAD_ID"):
+        return {"harness": "codex", "id": os.environ["CODEX_THREAD_ID"]}
+    if os.environ.get("CLAUDE_CODE_SESSION_ID"):
+        return {"harness": "claude", "id": os.environ["CLAUDE_CODE_SESSION_ID"]}
+    return None
+
+
+def wake_path():
+    return os.path.join(home_dir(), ".notify.wake.json")
+
+
+def read_wakes():
+    try:
+        with open(wake_path(), encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, ValueError):
+        return []
+
+
+def add_wake(session_id, ids, cwd):
+    with open(os.path.join(home_dir(), ".notify.lock"), "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        wakes = read_wakes()
+        wakes.append({"session": session_id, "ids": sorted(set(ids)), "cwd": cwd})
+        atomic_write(wake_path(), json.dumps(wakes, indent=2) + "\n")
+
+
+def hear_back_hint(ids):
+    """Arrange for this session to hear when the epics finish, in the way its harness supports."""
+    session = current_session()
+    numbers = " ".join(str(i) for i in ids)
+    if session and session["harness"] == "codex":
+        add_wake(session["id"], ids, os.getcwd())
+        print("This Codex session will be resumed when they finish or get stuck. End your turn; don't poll.")
+    elif session:
+        print("To hear back, run `kb wait %s` as a background command, then end your turn; don't poll." % numbers)
+
+
+def label_cards(board, ids):
+    labels = []
+    for i in ids:
+        with contextlib.suppress(KbError):
+            labels.append("#%d %s" % (i, board.find(i)[1].title))
+    return labels or ["#%d" % i for i in ids]
+
+
+def collect_wakes(events):
+    """Work out which sessions to wake. Call while holding the notify lock."""
+    changes = [e for e in events if e["type"] in ("moved", "blocked")]
+    wakes = read_wakes()
+    if not changes or not wakes:
+        return []
+    board = load()
+    # The log is written just before the board, so apply these events on top of what we read.
+    states = {c.id: s.name.lower() for s, c in board.all_cards()}
+    for event in changes:
+        if event["type"] == "moved":
+            states[event["id"]] = event["to"].lower()
+    due, keep = [], []
+    for wake in wakes:
+        mine = [e for e in changes if e["id"] in wake["ids"]]
+        stuck = [e for e in mine if e["type"] == "blocked" and e.get("session") != wake["session"]]
+        finished = all(states.get(i, "done") in ("review", "done") for i in wake["ids"])
+        if finished and mine:
+            if any(e.get("session") != wake["session"] for e in mine):
+                due.append((wake, "Bento update: %s finished and reached Review. Run `kb show <id>` to read the notes." % "; ".join(label_cards(board, wake["ids"]))))
+            continue
+        keep.append(wake)
+        for event in stuck:
+            due.append((wake, "Bento update: #%d %s is blocked: %s" % (event["id"], event["title"], event.get("reason", ""))))
+    atomic_write(wake_path(), json.dumps(keep, indent=2) + "\n")
+    return due
+
+
+def wake_session(wake, message):
+    """Resume a Codex session with the news, without waiting for its turn to finish."""
+    prompt = message + " Tell the user what happened in this thread. Don't start new work unless your plan already says to."
+    codex = shutil.which("codex")
+    if not codex:
+        print("kb: can't wake session %s: codex isn't on PATH" % wake["session"], file=sys.stderr)
+        return
+    cwd = wake["cwd"] if os.path.isdir(wake.get("cwd", "")) else home_dir()
+    subprocess.Popen(
+        [codex, "exec", "--skip-git-repo-check", "--color", "never", "resume", wake["session"], prompt],
+        cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=sys.stderr, start_new_session=True,
+    )
+
+
+def deliver_pending():
+    """Send anything new in the event log, exactly once, however many servers are running."""
+    path = events_path()
+    offset_file = os.path.join(home_dir(), ".notify.offset")
+    with open(os.path.join(home_dir(), ".notify.lock"), "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        size = os.path.getsize(path) if os.path.exists(path) else 0
+        if not os.path.exists(offset_file):
+            atomic_write(offset_file, str(size))  # Don't replay history on first run.
+            return
+        with open(offset_file, encoding="utf-8") as f:
+            offset = int(f.read().strip() or 0)
+        if size <= offset:
+            return
+        with open(path, "rb") as f:
+            f.seek(offset)
+            data = f.read()
+        data = data[: data.rfind(b"\n") + 1]
+        atomic_write(offset_file, str(offset + len(data)))
+        events = []
+        for line in data.decode("utf-8", "replace").splitlines():
+            with contextlib.suppress(ValueError):
+                events.append(json.loads(line))
+        due = collect_wakes(events)
+    try:
+        for wake, message in due:
+            wake_session(wake, message)
+        send_notifications(events)
+    except (OSError, subprocess.SubprocessError) as e:
+        print("kb: couldn't send an update: %s" % e, file=sys.stderr)
+
+
+class Watch:
+    """Sleep until the workspace changes. Uses kernel events where available, so nothing polls."""
+
+    def __init__(self):
+        self.kq = None
+        self.last = self._stamp()
+        if hasattr(select, "kqueue"):
+            self.fd = os.open(home_dir(), os.O_RDONLY)
+            self.kq = select.kqueue()
+            self.event = select.kevent(
+                self.fd, filter=select.KQ_FILTER_VNODE,
+                flags=select.KQ_EV_ADD | select.KQ_EV_CLEAR, fflags=select.KQ_NOTE_WRITE,
+            )
+            self.kq.control([self.event], 0, 0)
+
+    def _stamp(self):
+        with contextlib.suppress(OSError):
+            stat = os.stat(board_path())
+            return (stat.st_mtime_ns, stat.st_size)
+        return None
+
+    def wait(self, timeout):
+        if self.kq:
+            self.kq.control(None, 1, timeout)
+            return
+        deadline = time.time() + timeout
+        while time.time() < deadline and self._stamp() == self.last:
+            time.sleep(1)  # No kernel events on this system (e.g. Linux without kqueue).
+        self.last = self._stamp()
+
+
+class Hub:
+    """Tells open web boards the moment something changes."""
+
+    cond = threading.Condition()
+    count = 0
+
+    @classmethod
+    def bump(cls):
+        with cls.cond:
+            cls.count += 1
+            cls.cond.notify_all()
+
+
+def snapshot_workspace():
+    """Commit workspace changes to its own local repo, so edits can be undone. This never pushes."""
+    home = home_dir()
+    if not os.path.isdir(os.path.join(home, ".git")) or not git(home, "status", "--porcelain"):
+        return False
+    git(home, "add", "-A")
+    identity = ["-c", "user.name=Bento", "-c", "user.email=bento@localhost", "-c", "commit.gpgsign=false"]
+    return git(home, *identity, "commit", "--no-verify", "-q", "-m", "Snapshot") is not None
+
+
+def watch_workspace():
+    watch = Watch()
+    last = None
+    last_snapshot = 0
+    while True:
+        with contextlib.suppress(Exception):
+            if time.time() - last_snapshot >= 60:
+                last_snapshot = time.time()
+                snapshot_workspace()
+            deliver_pending()
+            stat = os.stat(board_path())
+            stamp = (stat.st_mtime_ns, stat.st_size)
+            if stamp != last:
+                last = stamp
+                Hub.bump()
+        watch.wait(30)
+
+
+# ---- Picking work -----------------------------------------------------------
+
+
+def why_not_ready(board, card, who=None):
+    """Return why this card can't be picked up by `who`, or None if it can."""
+    if card.get("kind") == "milestone":
+        return "a milestone, not work to pick up"
+    if card.get("blocked"):
+        return "blocked: " + card.get("blocked")
+    column_of = {c.id: s.name.lower() for s, c in board.all_cards()}
+    waiting = [n for n in card.numbers("needs") if column_of.get(n, "done") != "done"]
+    if waiting:
+        return "waiting on " + ", ".join("#%d" % n for n in waiting)
+    building = [n for n in card.numbers("verifies") if column_of.get(n, "done") not in ("review", "done")]
+    if building:
+        return "nothing to test until " + ", ".join("#%d" % n for n in building) + " reaches Review"
+    target = (card.get("for") or "any").lower()
+    if who and target not in ("any", who.lower()):
+        return "for " + target
+    return None
+
+
+def pick(board, who=None, project=None):
+    for card in board.column("Next").cards:
+        if project and card.get("project") != project:
+            continue
+        if not why_not_ready(board, card, who):
+            return card
+    return None
+
+
+def held_by(board, who):
+    return [
+        c for c in board.column("Doing").cards
+        if (c.get("claimed") or "").split(" ")[0].lower() == who.lower() and not c.get("blocked")
+    ]
+
+
+def move_card(board, card, column, before=None, top=False):
+    source, _ = board.find(card.id)
+    dest = board.column(column)
+    source.cards.remove(card)
+    if source.name.lower() == "scratchpad" and dest.name.lower() not in ("scratchpad", "done"):
+        # Promoted from a scratchpad note to an epic anyone can pick up.
+        card.set("kind", None)
+        card.set("for", "any")
+    if dest.name.lower() in ("scratchpad", "backlog", "next"):
+        card.set("claimed", None)
+    index = len(dest.cards)
+    if top or (before is None and dest.name.lower() == "done"):
+        index = 0
+    elif before is not None:
+        for i, other in enumerate(dest.cards):
+            if other.id == before:
+                index = i
+                break
+    dest.cards.insert(index, card)
+
+
+def read_trash():
+    trash = Board()
+    if os.path.exists(trash_path()):
+        with open(trash_path(), encoding="utf-8") as f:
+            trash = parse(f.read())
+    else:
+        trash = parse("# Trash\n\nDeleted cards. Bring one back with: kb restore <id>\n")
+    return trash
+
+
+def delete_card(id):
+    """Move a card to TRASH.md and clear every reference to it."""
+    with locked() as board:
+        section, card = board.find(id)
+        trash = read_trash()
+        trash.column(section.name).cards.insert(0, card)
+        atomic_write(trash_path(), trash.serialize())
+        section.cards.remove(card)
+        for _, other in board.all_cards():
+            for field in ("needs", "verifies"):
+                if id in other.numbers(field):
+                    rest = [n for n in other.numbers(field) if n != id]
+                    other.set(field, ", ".join("#%d" % n for n in rest) or None)
+        title = card.title
+    with open(os.path.join(home_dir(), ".notify.lock"), "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        wakes = read_wakes()
+        if wakes:
+            for wake in wakes:
+                wake["ids"] = [i for i in wake["ids"] if i != id]
+            atomic_write(wake_path(), json.dumps([w for w in wakes if w["ids"]], indent=2) + "\n")
+    return title
+
+
+def restore_card(id):
+    with locked() as board:
+        trash = read_trash()
+        section, card = trash.find(id)
+        section.cards.remove(card)
+        board.column(section.name).cards.insert(0, card)
+        atomic_write(trash_path(), trash.serialize())
+    return card.title, section.name
+
+
+def archive_done():
+    with locked() as board:
+        done = board.column("Done")
+        cards, done.cards = done.cards, []
+        if cards:
+            existing = "# Archive\n"
+            if os.path.exists(archive_path()):
+                with open(archive_path(), encoding="utf-8") as f:
+                    existing = f.read()
+            block = "\n\n".join(c.markdown() for c in cards)
+            atomic_write(archive_path(), existing.rstrip("\n") + "\n\n" + block + "\n")
+    return len(cards)
+
+
+def dependency_ids(board, card):
+    """Everything this card waits on, directly or through other cards, nearest first."""
+    seen, queue = [], card.numbers("needs") + card.numbers("verifies")
+    while queue:
+        current = queue.pop(0)
+        if current in seen or current == card.id:
+            continue
+        seen.append(current)
+        with contextlib.suppress(KbError):
+            other = board.find(current)[1]
+            queue += other.numbers("needs") + other.numbers("verifies")
+    return seen
+
+
+def check_dated(card_kind):
+    if card_kind not in DATED_KINDS:
+        raise KbError("Dates belong on milestones and releases. Link this epic to one with needs instead.")
+
+
+def valid_date(value):
+    try:
+        datetime.date.fromisoformat(value)
+    except (TypeError, ValueError):
+        raise KbError("Dates look like 2026-12-01.")
+    return value
+
+
+def tracking(board, section, card):
+    """Where a dated or release epic stands, with its dependencies."""
+    deps = []
+    for dep_id in dependency_ids(board, card):
+        with contextlib.suppress(KbError):  # Not on the board means archived, so finished.
+            dep_section, dep = board.find(dep_id)
+            deps.append({
+                "id": dep.id, "title": dep.title, "column": dep_section.name,
+                "blocked": dep.get("blocked"), "target": dep.get("target"),
+            })
+    open_deps = [d for d in deps if d["column"].lower() != "done"]
+    target = card.get("target")
+    status, reason = "on track", None
+    try:
+        days = (datetime.date.fromisoformat(target) - datetime.date.today()).days if target else None
+    except ValueError:
+        days, target = None, None
+    if section.name.lower() == "done":
+        status = "reached"
+    elif not target:
+        status = "no date"
+    elif days < 0:
+        status, reason = "late", "The date has passed."
+    else:
+        blocked = [d for d in open_deps if d["blocked"]]
+        later = [d for d in open_deps if d["target"] and d["target"] > target]
+        if card.get("blocked") or blocked:
+            status, reason = "at risk", "#%d is blocked." % (blocked[0]["id"] if blocked else card.id)
+        elif later:
+            status, reason = "at risk", "#%d is dated after this." % later[0]["id"]
+        elif open_deps and days <= 7:
+            status, reason = "at risk", "%d %s open with %d %s left." % (len(open_deps), "dependency is" if len(open_deps) == 1 else "dependencies are", days, "day" if days == 1 else "days")
+    return {
+        "id": card.id, "target": target, "status": status, "reason": reason, "deps": deps,
+        "done": len(deps) - len(open_deps), "total": len(deps),
+    }
+
+
+def card_json(board, section, card):
+    return {
+        "id": card.id,
+        "title": card.title,
+        "column": section.name,
+        "fields": card.fields(),
+        "body": "\n".join(card.lines),
+        "not_ready": why_not_ready(board, card),
+    }
+
+
+def board_json(board):
+    top = pick(board)
+    config = read_config()
+    used = {c.get("project") for _, c in board.all_cards() if c.get("project")}
+    return {
+        "columns": [
+            {"name": s.name, "cards": [card_json(board, s, c) for c in s.cards]}
+            for s in board.sections
+        ],
+        "up_next": top.id if top else None,
+        "today": today(),
+        "tracking": [
+            tracking(board, s, c) for s, c in board.all_cards()
+            if s.name.lower() != "scratchpad" and c.get("kind") in DATED_KINDS
+        ],
+        "owner": config.get("owner", "me"),
+        "projects": sorted(used | set(config.get("projects", {}))),
+        "kinds": KINDS,
+    }
+
+
+# ---- Command line ----------------------------------------------------------
+
+
+def require_who(args):
+    if not args.who:
+        raise KbError("Say who you are: --as claude, --as codex or --as %s (or set KB_AS)." % owner())
+    return args.who.lower()
+
+
+def summary(card):
+    bits = []
+    f = card.fields()
+    if f.get("project"):
+        bits.append("[%s]" % f["project"])
+    if f.get("kind") and f["kind"] != "implementation":
+        bits.append(f["kind"])
+    if f.get("for") and f["for"] != "any":
+        bits.append("for:" + f["for"])
+    if f.get("claimed"):
+        bits.append("claimed:" + f["claimed"])
+    if f.get("target"):
+        bits.append("target:" + f["target"])
+    if f.get("needs"):
+        bits.append("needs:" + f["needs"])
+    if f.get("verifies"):
+        bits.append("verifies:" + f["verifies"])
+    if f.get("plan"):
+        bits.append("plan")
+    if f.get("blocked"):
+        bits.append("BLOCKED: " + f["blocked"])
+    return "#%d %s%s" % (card.id, card.title, "  " + " ".join(bits) if bits else "")
+
+
+def scope(args):
+    """The project a command is limited to: --project, else the connected folder, unless --all-projects."""
+    if getattr(args, "all_projects", False):
+        return None
+    return getattr(args, "project", None) or detect_project()
+
+
+def cmd_list(args):
+    board = load()
+    if args.json:
+        print(json.dumps(board_json(board), indent=2))
+        return
+    project = getattr(args, "project", None)
+    kind = getattr(args, "kind", None)
+    for section in board.sections:
+        cards = [
+            c for c in section.cards
+            if (not project or c.get("project") == project)
+            and (not kind or (c.get("kind") or "implementation") == kind)
+        ]
+        print("%s (%d)" % (section.name.upper(), len(cards)))
+        shown = cards if args.all or section.name.lower() != "done" else cards[:5]
+        for card in shown:
+            print("  " + summary(card))
+        if len(shown) < len(cards):
+            print("  ... %d more (--all)" % (len(cards) - len(shown)))
+        print()
+
+
+def cmd_next(args):
+    board = load()
+    who = args.who.lower() if args.who else None
+    project = scope(args)
+    held = held_by(board, who) if who else []
+    card = pick(board, who, project)
+    if args.json:
+        data = {"project": project, "holding": [c.id for c in held]}
+        data["next"] = card_json(board, board.column("Next"), card) if card else None
+        print(json.dumps(data, indent=2))
+        return
+    if held:
+        print("%s is already working on: %s\n" % (who, ", ".join("#%d %s" % (c.id, c.title) for c in held)))
+    where = " in %s" % project if project else ""
+    if card:
+        print("Next up%s:\n\n%s" % (where, card.markdown()))
+        return
+    print("Nothing in Next can be picked up%s%s." % (" by " + who if who else "", where))
+    for c in board.column("Next").cards:
+        if not project or c.get("project") == project:
+            print("  #%d %s: %s" % (c.id, c.title, why_not_ready(board, c, who)))
+    if project:
+        print("Other projects: kb next --all-projects")
+
+
+def cmd_show(args):
+    board = load()
+    section, card = board.find(args.id)
+    if args.json:
+        print(json.dumps(card_json(board, section, card), indent=2))
+    else:
+        print("[%s]\n%s" % (section.name, card.markdown()))
+
+
+def cmd_claim(args):
+    who = require_who(args)
+    texts = []
+    with locked() as board:
+        held = held_by(board, who)
+        if held and not args.also:
+            raise KbError(
+                "%s already holds #%d. Finish it first, or pass --also to work in parallel." % (who, held[0].id)
+            )
+        if args.ids:
+            cards = []
+            for id in args.ids:
+                section, card = board.find(id)
+                if section.name.lower() != "next":
+                    raise KbError("#%d is in %s, not Next, so it can't be claimed." % (card.id, section.name))
+                reason = why_not_ready(board, card, who)
+                if reason:
+                    raise KbError("#%d can't be claimed: %s." % (card.id, reason))
+                cards.append(card)
+        else:
+            card = pick(board, who, scope(args))
+            if not card:
+                raise KbError("Nothing in Next can be picked up by %s. Run: kb next --as %s" % (who, who))
+            cards = [card]
+        for card in cards:
+            card.set("claimed", "%s %s" % (who, today()))
+            move_card(board, card, "Doing")
+            texts.append(card.markdown())
+    print("Claimed by %s:\n\n%s" % (who, "\n\n".join(texts)))
+
+
+def set_kind(card, kind):
+    if kind:
+        if kind not in KINDS + DATED_KINDS:
+            raise KbError("Kind must be one of: %s." % ", ".join(sorted(set(KINDS + DATED_KINDS))))
+        card.set("kind", kind)
+
+
+def cmd_add(args):
+    project = args.project or detect_project()
+    source = resolve_doc(args.source, project) if args.source else None
+    plan = resolve_doc(args.plan, project) if args.plan else None
+    if args.target:
+        valid_date(args.target)
+        check_dated(args.kind)
+    with locked() as board:
+        card = Card(board.next_id(), one_line(args.title))
+        capture = (args.to or "").lower() in ("scratchpad", "desk")
+        card.set("for", args.for_who or (owner() if capture else "any"))
+        set_kind(card, args.kind)
+        card.set("project", project)
+        card.set("release", args.release)
+        card.set("target", args.target)
+        card.set("theme", args.theme)
+        card.set("source", source)
+        card.set("plan", plan)
+        if args.needs:
+            card.set("needs", ", ".join("#%s" % n for n in re.findall(r"\d+", args.needs)))
+        if args.verifies:
+            card.set("verifies", ", ".join("#%s" % n for n in re.findall(r"\d+", args.verifies)))
+        card.set("done when", args.done_when)
+        if args.note:
+            card.note(args.note, args.who)
+        column = board.column(args.to or ("Milestones" if args.kind == "milestone" else "Backlog"))
+        if args.top:
+            column.cards.insert(0, card)
+        else:
+            column.cards.append(card)
+        print("Added #%d to %s%s." % (card.id, column.name, " (%s)" % project if project else ""))
+        if not project and not capture:
+            print("It has no project, so it won't appear under any project filter. Set one: kb set %d project <name>" % card.id)
+
+
+PLAN_TEMPLATES = {
+    "implementation": "## Goal\n\n## Epics\n\n{epics}\n\n## Approach\n\n## Out of scope\n\n## Risks and open questions\n\n## Done when\n",
+    "testing": "## What this verifies\n\n{epics}\n\n## Environments\n\n## Checks\n\n| Check | How | Expected | Result |\n| --- | --- | --- | --- |\n\n## Failure and recovery cases\n\n## Results\n",
+    "release": "## Theme\n\n## What ships\n\n{epics}\n\n## Acceptance criteria\n\n## Rollout steps\n\n## Rollback\n\n## Release notes\n\n## After release\n",
+    "milestone": "## Theme\n\n## What's in it\n\n{epics}\n\n## Acceptance criteria\n\n## Release notes\n\n## After it lands\n",
+    "writing": "## The piece\n\n{epics}\n\n## Audience\n\n## Outline\n\n## Channel and publish date\n\n## What it warms up\n",
+}
+
+
+def create_plan(kind, project, title, ids):
+    """Start a plan doc for these cards and link it to them. Returns its workspace path."""
+    if kind not in PLAN_TEMPLATES:
+        raise KbError("Kind must be one of: %s." % ", ".join(sorted(PLAN_TEMPLATES)))
+    folder = os.path.join(home_dir(), "products", project, "plans")
+    os.makedirs(folder, exist_ok=True)
+    full = os.path.join(folder, "%s-%s.md" % (kind, slug(title).strip("-") or "plan"))
+    rel = os.path.relpath(full, home_dir())
+    if os.path.exists(full):
+        raise KbError("%s already exists." % rel)
+    with locked() as board:
+        cards = [board.find(i)[1] for i in ids]
+        for card in cards:
+            card.set("plan", rel)
+        listed = cards
+        if kind in DATED_KINDS and cards:
+            # A milestone's doc lists the work feeding it, not the milestone itself.
+            listed = []
+            for dep in dependency_ids(board, cards[0]):
+                with contextlib.suppress(KbError):
+                    listed.append(board.find(dep)[1])
+    epics = "\n".join("- #%d %s" % (c.id, c.title) for c in listed) or "- (none linked yet)"
+    heading = one_line(title) if kind == "milestone" else "%s plan: %s" % (kind.capitalize(), one_line(title))
+    atomic_write(full, "# %s\n\n%s" % (heading, PLAN_TEMPLATES[kind].format(epics=epics)))
+    return rel
+
+
+def cmd_plan(args):
+    project = args.project or detect_project()
+    if not project:
+        raise KbError("Which project? Pass --project, or run this from a connected folder.")
+    rel = create_plan(args.kind, project, args.title, args.epics)
+    print("Created %s" % os.path.join(home_dir(), rel))
+
+
+def card_state(board, id):
+    """Column name for a card, treating an archived card as Done."""
+    try:
+        return board.find(id)[0].name.lower()
+    except KbError:
+        if os.path.exists(archive_path()):
+            with open(archive_path(), encoding="utf-8") as f:
+                if re.search(r"^### #%d\b" % id, f.read(), re.M):
+                    return "done"
+        raise
+
+
+def wait_for(ids, until="review", timeout=None):
+    """Sleep until every card finishes, or one gets stuck. Returns an exit code."""
+    finished = ("done",) if until == "done" else ("review", "done")
+    watch = Watch()
+    deadline = time.time() + timeout if timeout else None
+    while True:
+        board = load()
+        states = {i: card_state(board, i) for i in ids}
+        stuck = [i for i in ids if states[i] != "done" and board.find(i)[1].get("blocked")]
+        if stuck:
+            for i in stuck:
+                print("Blocked:\n\n%s\n" % board.find(i)[1].markdown())
+            return 2
+        if all(states[i] in finished for i in ids):
+            for i in ids:
+                with contextlib.suppress(KbError):
+                    print("[%s]\n%s\n" % (states[i].capitalize(), board.find(i)[1].markdown()))
+            print("Finished: %s" % ", ".join("#%d" % i for i in ids))
+            return 0
+        left = deadline - time.time() if deadline else 30
+        if left <= 0:
+            print("Still waiting: %s" % ", ".join("#%d" % i for i in ids if states[i] not in finished))
+            return 3
+        watch.wait(min(left, 30))
+
+
+def cmd_wake(args):
+    load()
+    if not current_session():
+        raise KbError("This isn't running inside an agent session.")
+    hear_back_hint(args.ids)
+
+
+def cmd_wait(args):
+    sys.exit(wait_for(args.ids, args.until, args.timeout))
+
+
+def service_path():
+    return os.path.expanduser("~/Library/LaunchAgents/%s.plist" % SERVICE_LABEL)
+
+
+def cmd_service(args):
+    if sys.platform != "darwin":
+        raise KbError("The service installer is macOS only. Elsewhere, keep `kb serve --no-open` running with your own process manager.")
+    target = "gui/%d" % os.getuid()
+    if args.action == "status":
+        out = subprocess.run(["launchctl", "print", "%s/%s" % (target, SERVICE_LABEL)], capture_output=True, text=True)
+        print("Running" if out.returncode == 0 else "Not running")
+        return
+    subprocess.run(["launchctl", "bootout", "%s/%s" % (target, SERVICE_LABEL)], capture_output=True)
+    if args.action == "uninstall":
+        with contextlib.suppress(FileNotFoundError):
+            os.remove(service_path())
+        print("Removed the Bento service.")
+        return
+    log = os.path.join(home_dir(), ".service.log")
+    plist = """<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>%s</string>
+  <key>ProgramArguments</key><array>
+    <string>%s</string><string>%s</string><string>serve</string><string>--no-open</string><string>--port</string><string>%d</string>
+  </array>
+  <key>EnvironmentVariables</key><dict>
+    <key>BENTO_HOME</key><string>%s</string>
+    <key>PATH</key><string>%s</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardErrorPath</key><string>%s</string>
+</dict></plist>
+""" % (SERVICE_LABEL, sys.executable, os.path.join(HERE, "kb"), args.port, home_dir(),
+       os.environ.get("PATH", "/usr/bin:/bin"), log)
+    os.makedirs(os.path.dirname(service_path()), exist_ok=True)
+    atomic_write(service_path(), plist)
+    out = subprocess.run(["launchctl", "bootstrap", target, service_path()], capture_output=True, text=True)
+    if out.returncode:
+        raise KbError("launchctl couldn't start the service: %s" % out.stderr.strip())
+    print("Bento now runs in the background at http://127.0.0.1:%d and starts at login." % args.port)
+
+
+def cmd_handoff(args):
+    who = require_who(args)
+    target = args.to.lower()
+    plan = resolve_doc(args.plan, detect_project()) if args.plan else None
+    with locked() as board:
+        pairs = [board.find(i) for i in args.ids]
+        for section, card in pairs:
+            if section.name.lower() == "done":
+                raise KbError("#%d is already Done." % card.id)
+            if section.name.lower() == "doing" and not (card.get("claimed") or "").startswith(who):
+                raise KbError("#%d is being worked on by %s." % (card.id, card.get("claimed")))
+        for _, card in reversed(pairs):
+            card.set("for", target)
+            if plan:
+                card.set("plan", plan)
+                card.set("approved", None)
+            card.note("handed to %s" % target, who)
+            move_card(board, card, "Next", top=True)
+    print("Handed %s to %s.%s" % (
+        ", ".join("#%d" % i for i in args.ids), target,
+        " Plan: %s" % os.path.join(home_dir(), plan) if plan else "",
+    ))
+    if args.wait:
+        sys.stdout.flush()
+        sys.exit(wait_for(args.ids))
+    hear_back_hint(args.ids)
+
+
+def cmd_move(args):
+    with locked() as board:
+        _, card = board.find(args.id)
+        move_card(board, card, args.column, top=args.top)
+        if args.column.lower() == "doing" and args.who and not card.get("claimed"):
+            card.set("claimed", "%s %s" % (args.who.lower(), today()))
+        print("Moved #%d to %s." % (card.id, board.column(args.column).name))
+
+
+def cmd_review(args):
+    who = require_who(args)
+    with locked() as board:
+        section, card = board.find(args.id)
+        holder = (card.get("claimed") or "").split(" ")[0].lower()
+        if holder and holder != who:
+            raise KbError("#%d is claimed by %s, not %s." % (card.id, holder, who))
+        if section.name.lower() == "done":
+            raise KbError("#%d is already Done." % card.id)
+        if args.note:
+            card.note(args.note, who)
+        move_card(board, card, "Review")
+    print("#%d is in Review." % args.id)
+
+
+def cmd_delete(args):
+    title = delete_card(args.id)
+    print("Deleted #%d %s. Bring it back with: kb restore %d" % (args.id, title, args.id))
+
+
+def cmd_restore(args):
+    try:
+        title, column = restore_card(args.id)
+    except KbError:
+        raise KbError("No card #%d in the trash." % args.id)
+    print("Restored #%d %s to %s. Anything that depended on it needs relinking with kb set." % (args.id, title, column))
+
+
+def cmd_note(args):
+    with locked() as board:
+        _, card = board.find(args.id)
+        card.note(args.text, args.who.lower() if args.who else None)
+    print("Noted on #%d." % args.id)
+
+
+def cmd_calendar(args):
+    board = load()
+    rows = tracking_rows(board, args.project)
+    if args.json:
+        print(json.dumps(rows, indent=2))
+        return
+    for row in rows:
+        print("%s  #%d %s  [%s]  %s, %d of %d dependencies done%s" % (
+            row["target"] or "no date   ", row["id"], row["title"], row["project"] or "-", row["status"],
+            row["done"], row["total"], "  " + row["reason"] if row["reason"] else "",
+        ))
+        if row["theme"]:
+            print("    Theme: %s" % row["theme"])
+        if row["doc"]:
+            print("    Doc: %s" % row["doc"])
+        for dep in row["deps"]:
+            print("    #%d %s: %s%s" % (dep["id"], dep["title"], dep["column"], ", blocked" if dep["blocked"] else ""))
+
+
+def tracking_rows(board, project=None):
+    rows = []
+    for row in board_json(board)["tracking"]:
+        card = board.find(row["id"])[1]
+        if not project or card.get("project") == project:
+            rows.append(dict(row, title=card.title, project=card.get("project"), theme=card.get("theme"), doc=card.get("plan")))
+    return sorted(rows, key=lambda r: (r["target"] or "9999", r["id"]))
+
+
+def cmd_set(args):
+    value = " ".join(args.value) or None
+    if args.field == "target" and value:
+        valid_date(value)
+    with locked() as board:
+        _, card = board.find(args.id)
+        if args.field == "target" and value:
+            check_dated(card.get("kind"))
+        card.set(args.field, value)
+    print("Updated #%d." % args.id)
+
+
+def cmd_block(args):
+    with locked() as board:
+        _, card = board.find(args.id)
+        card.set("blocked", args.reason)
+    print("#%d is blocked." % args.id)
+
+
+def cmd_unblock(args):
+    with locked() as board:
+        _, card = board.find(args.id)
+        card.set("blocked", None)
+    print("#%d is unblocked." % args.id)
+
+
+def cmd_archive(args):
+    print("Archived %d card(s) to ARCHIVE.md." % archive_done())
+
+
+def cmd_init(args):
+    path = os.path.realpath(os.path.expanduser(args.path)) if args.path else home_dir()
+    os.makedirs(os.path.join(path, "products"), exist_ok=True)
+    if args.path and not os.environ.get("BENTO_HOME"):
+        os.makedirs(os.path.dirname(POINTER), exist_ok=True)
+        atomic_write(POINTER, path + "\n")
+    os.environ["BENTO_HOME"] = path
+    if not os.path.exists(board_path()):
+        atomic_write(board_path(), "# Board\n\n" + "".join("## %s\n\n" % c for c in COLUMNS))
+    if not os.path.exists(config_path()):
+        write_config({"owner": args.owner or os.environ.get("USER", "me"), "projects": {}})
+    elif args.owner:
+        config = read_config()
+        config["owner"] = args.owner
+        write_config(config)
+    atomic_write(os.path.join(path, ".gitignore"), ".board.lock\n.kb-*\n.notify.*\n.service.log\nEVENTS.log\n")
+    if not os.path.isdir(os.path.join(path, ".git")):
+        git(path, "init", "-q")
+    print("Bento workspace ready at %s" % path)
+
+
+def cmd_connect(args):
+    path = os.path.realpath(os.path.expanduser(args.path or os.getcwd()))
+    if not os.path.isdir(path):
+        raise KbError("No folder at %s." % path)
+    root = repo_root(path) or path
+    name = slug(args.name or os.path.basename(root)).strip("-")
+    if not name:
+        raise KbError("Pass a project name with --name.")
+    config = read_config()
+    if not os.path.exists(config_path()):
+        raise KbError("No workspace yet. Run: kb init")
+    info = config["projects"].setdefault(name, {"paths": []})
+    if root not in info["paths"]:
+        info["paths"].append(root)
+    remote = normalize_remote(git(path, "remote", "get-url", "origin"))
+    if remote:
+        info["remote"] = remote
+    write_config(config)
+    print("Connected %s (%s)" % (name, remote or root))
+    if args.import_docs:
+        print("Imported %d docs to products/%s" % (import_docs(name, root), name))
+
+
+def cmd_import(args):
+    projects = read_config().get("projects", {})
+    names = [args.project] if args.project else sorted(projects)
+    for name in names:
+        if name not in projects:
+            raise KbError("%s isn't connected. Run: kb connect" % name)
+        print("%s: imported %d docs" % (name, import_docs(name, projects[name]["paths"][0])))
+
+
+def cmd_projects(args):
+    current = detect_project()
+    for name, info in sorted(read_config().get("projects", {}).items()):
+        print("%s %s  %s" % ("*" if name == current else " ", name, info.get("remote") or info["paths"][0]))
+
+
+def cmd_docs(args):
+    project = args.project or (None if args.all_projects else detect_project())
+    data = list_docs(project)
+    if args.json:
+        print(json.dumps(data, indent=2))
+        return
+    for item in data:
+        print("%s (%d plans, %d docs)" % (item["name"], len(item["plans"]), len(item["docs"])))
+        for rel in item["plans"] + item["docs"][: (None if args.long else 8)]:
+            print("  " + rel)
+        if not args.long and len(item["docs"]) > 8:
+            print("  ... %d more (--long)" % (len(item["docs"]) - 8))
+
+
+def report_key(name):
+    key = slug(name).strip("-")
+    if not key:
+        raise KbError("A report needs a name.")
+    return key
+
+
+def report_url(info):
+    return "codex://threads/%s" % info["thread"] if info.get("thread") else info.get("link")
+
+
+def report_latest(key, info):
+    folder = os.path.join(home_dir(), "products", info.get("project") or "_general", "reports", key)
+    if not os.path.isdir(folder):
+        return None
+    files = sorted(f for f in os.listdir(folder) if f.endswith(".md"))
+    if not files:
+        return None
+    return {"date": files[-1][:-3], "path": os.path.relpath(os.path.join(folder, files[-1]), home_dir())}
+
+
+def reports_json():
+    result = []
+    for key, info in sorted(read_config().get("reports", {}).items()):
+        result.append(dict(info, key=key, url=report_url(info), latest=report_latest(key, info)))
+    return result
+
+
+def cmd_report(args):
+    config = read_config()
+    reports = config.setdefault("reports", {})
+    if args.action == "list":
+        data = reports_json()
+        if args.json:
+            print(json.dumps(data, indent=2))
+            return
+        for item in data:
+            latest = item["latest"]["date"] if item["latest"] else "no copy posted yet"
+            print("%s  [%s]  %s  %s  latest: %s" % (item["key"], item.get("project") or "-", item.get("schedule") or "-", item["url"] or "-", latest))
+        return
+    if not args.name:
+        raise KbError("Which report? Run: kb report list")
+    key = report_key(args.name)
+    if args.action == "add":
+        if not (args.thread or args.link):
+            raise KbError("Say where it arrives: --thread <Codex thread id> or --link <url>.")
+        if args.link and not re.match(r"(?i)^(https?|codex|claude)://", args.link):
+            raise KbError("--link must be an http, https, codex or claude address.")
+        info = {"name": one_line(args.name), "project": args.project or detect_project()}
+        for field, value in (("thread", args.thread), ("link", args.link), ("schedule", args.schedule)):
+            if value:
+                info[field] = value
+        reports[key] = info
+        write_config(config)
+        print("Tracking %s." % info["name"])
+        return
+    if key not in reports:
+        raise KbError("No report called '%s'. Run: kb report list" % args.name)
+    info = reports[key]
+    if args.action == "rm":
+        del reports[key]
+        write_config(config)
+        print("Stopped tracking %s. Copies already posted were kept." % info["name"])
+    elif args.action == "post":
+        if args.file and args.file != "-":
+            with open(os.path.expanduser(args.file), encoding="utf-8") as f:
+                text = f.read()
+        else:
+            text = sys.stdin.read()
+        if not text.strip():
+            raise KbError("That report is empty.")
+        folder = os.path.join(home_dir(), "products", info.get("project") or "_general", "reports", key)
+        os.makedirs(folder, exist_ok=True)
+        atomic_write(os.path.join(folder, today() + ".md"), text.rstrip("\n") + "\n")
+        print("Posted %s for %s." % (info["name"], today()))
+    else:
+        latest = report_latest(key, info)
+        if not latest:
+            raise KbError("No copy of %s has been posted yet. It arrives at %s" % (info["name"], report_url(info)))
+        with open(os.path.join(home_dir(), latest["path"]), encoding="utf-8") as f:
+            print("[%s]\n%s" % (latest["date"], f.read()))
+
+
+def cmd_history(args):
+    home = home_dir()
+    if not os.path.isdir(os.path.join(home, ".git")):
+        raise KbError("This workspace has no history yet. Run: kb init")
+    extra = ["--", args.path] if args.path else []
+    print(git(home, "log", "--format=%h  %ad", "--date=format:%Y-%m-%d %H:%M", "-n", str(args.limit), *extra) or "No snapshots yet.")
+
+
+def cmd_rules(args):
+    with open(os.path.join(HERE, "AGENTS.md"), encoding="utf-8") as f:
+        print(f.read().replace("{owner}", owner()).replace("{home}", home_dir()))
+
+
+def agent_block(name):
+    return "\n".join([
+        BLOCK_START,
+        "## Bento",
+        "",
+        "%s, Claude and Codex share a work queue and product docs in Bento, through the `kb` command, from any project. Your name on it is `%s`." % (owner(), name),
+        "",
+        "- When %s asks what's next, run `kb next --as %s` and answer from it. That only reads; don't claim anything unless asked to do the work." % (owner(), name),
+        "- Before you change the board or write a plan, run `kb rules` and follow them.",
+        "- Product docs live in `%s/products/`, not in the project repo. Run `kb docs` to find them." % home_dir(),
+        BLOCK_END,
+        "",
+    ])
+
+
+def write_block(path, block):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    text = ""
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+    if BLOCK_START in text and BLOCK_END in text:
+        head, rest = text.split(BLOCK_START, 1)
+        text = head + block.rstrip("\n") + rest.split(BLOCK_END, 1)[1]
+    else:
+        text = (text.rstrip("\n") + "\n\n" if text.strip() else "") + block
+    atomic_write(os.path.realpath(path), text)
+
+
+def cmd_install_agents(args):
+    home = os.path.expanduser("~")
+    write_block(os.path.join(home, ".claude", "CLAUDE.md"), agent_block("claude"))
+    write_block(os.path.join(home, ".codex", "AGENTS.md"), agent_block("codex"))
+    print("Added Bento instructions to ~/.claude/CLAUDE.md and ~/.codex/AGENTS.md")
+    config = os.path.join(home, ".codex", "config.toml")
+    text = ""
+    if os.path.exists(config):
+        with open(config, encoding="utf-8") as f:
+            text = f.read()
+    if home_dir() in text:
+        print("Codex can already write to %s" % home_dir())
+    elif "[sandbox_workspace_write]" in text or "sandbox_workspace_write." in text:
+        print('Add "%s" to writable_roots under [sandbox_workspace_write] in ~/.codex/config.toml so Codex can write to the board.' % home_dir())
+    elif os.path.isdir(os.path.dirname(config)):
+        atomic_write(config, text.rstrip("\n") + '\n\n[sandbox_workspace_write]\nwritable_roots = ["%s"]\n' % home_dir())
+        print("Let Codex write to %s in ~/.codex/config.toml" % home_dir())
+
+
+# ---- Local web board --------------------------------------------------------
+
+
+def clean_body(text):
+    """Make free text safe to store in a card, so it can't start a new card or column."""
+    lines = text.replace("\r\n", "\n").split("\n")
+    if sum(1 for l in lines if l.lstrip().startswith("```")) % 2:
+        raise KbError("That text has an unclosed ``` code fence.")
+    out, fenced = [], False
+    for line in lines:
+        if line.lstrip().startswith("```"):
+            fenced = not fenced
+        out.append("\\" + line if not fenced and re.match(r"^#{2,3} ", line) else line)
+    return trim(out)
+
+
+def api_move(data):
+    with locked() as board:
+        _, card = board.find(int(data["id"]))
+        before = data.get("before")
+        move_card(board, card, data["column"], before=int(before) if before is not None else None)
+        if data["column"].lower() == "doing" and not card.get("claimed"):
+            card.set("claimed", "%s %s" % (owner(), today()))
+
+
+def api_add(data):
+    title = one_line(data.get("title", ""))
+    if not title:
+        raise KbError("A card needs a title.")
+    with locked() as board:
+        card = Card(board.next_id(), title, clean_body(data.get("body", "")))
+        board.column(data.get("column", "Backlog")).cards.append(card)
+
+
+def api_edit(data):
+    title = one_line(data.get("title", ""))
+    if not title:
+        raise KbError("A card needs a title.")
+    with locked() as board:
+        section, card = board.find(int(data["id"]))
+        if data.get("base_body") != "\n".join(card.lines) or data.get("base_title") != card.title:
+            raise Conflict("This card changed while you were editing it. Reopen it to see the latest.")
+        card.title, card.lines = title, clean_body(data.get("body", ""))
+        if data.get("column") and data["column"].lower() != section.name.lower():
+            move_card(board, card, data["column"])
+
+
+def api_review(data):
+    """Approve a plan or ask for changes, on every epic that shares it."""
+    plan, decision, comment = data["plan"], data["decision"], one_line(data.get("comment", ""))
+    if decision == "changes" and not comment:
+        raise KbError("Say what should change.")
+    if decision not in ("approve", "changes"):
+        raise KbError("Unknown decision.")
+    me = owner()
+    with locked() as board:
+        cards = [c for _, c in board.all_cards() if c.get("plan") == plan]
+        if not cards:
+            raise KbError("No epic uses this plan.")
+        for card in cards:
+            if decision == "approve":
+                card.set("approved", "%s %s" % (me, today()))
+                if (card.get("blocked") or "").startswith("changes requested"):
+                    card.set("blocked", None)
+                card.note("approved the plan" + (": " + comment if comment else ""), me)
+            else:
+                card.set("approved", None)
+                card.set("blocked", "changes requested: " + comment)
+                card.note("asked for changes: " + comment, me)
+
+
+def api_milestone_doc(data):
+    """Return a milestone's doc, starting one if it doesn't have one yet."""
+    board = load()
+    card = board.find(int(data["id"]))[1]
+    if card.get("kind") not in DATED_KINDS:
+        raise KbError("Only milestones and releases get a doc this way.")
+    return {"path": card.get("plan") or create_plan(card.get("kind"), card.get("project") or "_general", card.title, [card.id])}
+
+
+def api_delete(data):
+    delete_card(int(data["id"]))
+
+
+def api_set(data):
+    if data.get("field") != "target":
+        raise KbError("Only the target date can be set this way.")
+    value = (data.get("value") or "").strip()
+    if value:
+        valid_date(value)
+    with locked() as board:
+        card = board.find(int(data["id"]))[1]
+        if value:
+            check_dated(card.get("kind"))
+        card.set("target", value or None)
+
+
+def thread_links(full):
+    """Links that start a new Codex or Claude Code thread on a doc. The person still presses send."""
+    prompt = "Open %s and help me edit it. Read it first, then ask what I want to change. Save your edits to that file." % full
+    quote = lambda value: urllib.parse.quote(value, safe="")
+    home = quote(home_dir())
+    claude = "claude://code/new?folder=%s&q=%s" if os.path.isdir("/Applications/Claude.app") else "claude-cli://open?cwd=%s&q=%s"
+    return {
+        "codex": "codex://threads/new?path=%s&prompt=%s" % (home, quote(prompt)),
+        "claude": claude % (home, quote(prompt)),
+    }
+
+
+def read_doc(path):
+    rel = resolve_doc(path).partition("#")[0]
+    full = os.path.join(home_dir(), rel)
+    with open(full, encoding="utf-8", errors="replace") as f:
+        return {"path": rel, "text": f.read(), "links": thread_links(full)}
+
+
+def api_doc_save(data):
+    """Save a doc from the web board, unless it changed since it was opened."""
+    rel = resolve_doc(data["path"]).partition("#")[0]
+    full = os.path.join(home_dir(), rel)
+    text = data["text"]
+    if not isinstance(text, str):
+        raise KbError("A doc's text must be text.")
+    with open(os.path.join(home_dir(), ".board.lock"), "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        with open(full, encoding="utf-8", errors="replace") as f:
+            if f.read() != data.get("base"):
+                raise Conflict("This doc changed while you were editing it. Copy your text, then reopen the doc.")
+        atomic_write(full, text)
+
+
+def make_handler(port):
+    allowed_hosts = {"127.0.0.1:%d" % port, "localhost:%d" % port}
+    allowed_origins = {"http://" + h for h in allowed_hosts}
+    actions = {
+        "/api/move": api_move, "/api/add": api_add, "/api/edit": api_edit,
+        "/api/review": api_review, "/api/set": api_set, "/api/delete": api_delete, "/api/doc-save": api_doc_save, "/api/milestone-doc": api_milestone_doc, "/api/archive": lambda d: archive_done(),
+    }
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def send(self, status, body, content_type="application/json"):
+            payload = body.encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(payload)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def host_ok(self):
+            if self.headers.get("Host") in allowed_hosts:
+                return True
+            self.send(403, json.dumps({"error": "Forbidden"}))
+            return False
+
+        def stream(self):
+            """Server-sent events: one message each time the board changes."""
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            seen = Hub.count
+            with contextlib.suppress(OSError):
+                self.wfile.write(b": connected\n\n")
+                self.wfile.flush()
+                while True:
+                    with Hub.cond:
+                        Hub.cond.wait_for(lambda: Hub.count != seen, timeout=25)
+                        changed = Hub.count != seen
+                        seen = Hub.count
+                    self.wfile.write(b"data: change\n\n" if changed else b": alive\n\n")
+                    self.wfile.flush()
+
+        def do_GET(self):
+            if not self.host_ok():
+                return
+            url = urllib.parse.urlsplit(self.path)
+            try:
+                if url.path == "/":
+                    with open(os.path.join(HERE, "board.html"), encoding="utf-8") as f:
+                        self.send(200, f.read(), "text/html; charset=utf-8")
+                elif url.path == "/api/board":
+                    with open(board_path(), encoding="utf-8") as f:
+                        text = f.read()
+                    data = board_json(parse(text))
+                    data["version"] = hashlib.sha1(text.encode("utf-8")).hexdigest()
+                    self.send(200, json.dumps(data))
+                elif url.path == "/api/stream":
+                    self.stream()
+                elif url.path == "/api/reports":
+                    self.send(200, json.dumps(reports_json()))
+                elif url.path == "/api/docs":
+                    self.send(200, json.dumps(list_docs()))
+                elif url.path == "/api/doc":
+                    path = urllib.parse.parse_qs(url.query).get("path", [""])[0]
+                    self.send(200, json.dumps(read_doc(path)))
+                else:
+                    self.send(404, json.dumps({"error": "Not found"}))
+            except KbError as e:
+                self.send(404, json.dumps({"error": str(e)}))
+            except OSError as e:
+                self.send(500, json.dumps({"error": str(e)}))
+
+        def do_POST(self):
+            if not self.host_ok():
+                return
+            origin = self.headers.get("Origin")
+            is_json = self.headers.get("Content-Type", "").startswith("application/json")
+            action = actions.get(self.path)
+            if (origin and origin not in allowed_origins) or not is_json:
+                self.send(403, json.dumps({"error": "Forbidden"}))
+            elif not action:
+                self.send(404, json.dumps({"error": "Not found"}))
+            else:
+                try:
+                    CTX.actor = owner().lower()
+                    length = int(self.headers.get("Content-Length") or 0)
+                    result = action(json.loads(self.rfile.read(length) or b"{}"))
+                    self.send(200, json.dumps(result if isinstance(result, dict) else {"ok": True}))
+                except Conflict as e:
+                    self.send(409, json.dumps({"error": str(e)}))
+                except (KbError, KeyError, ValueError) as e:
+                    self.send(400, json.dumps({"error": str(e)}))
+
+    return Handler
+
+
+def cmd_serve(args):
+    try:
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(args.port))
+    except OSError as e:
+        url = "http://127.0.0.1:%d" % args.port
+        with contextlib.suppress(OSError, ValueError):
+            with urllib.request.urlopen(url + "/api/board", timeout=2) as res:
+                json.load(res)
+            print("Bento is already running at %s" % url)
+            if not args.no_open:
+                webbrowser.open(url)
+            return
+        raise KbError("Can't use port %d (%s). Try --port." % (args.port, e.strerror))
+    url = "http://127.0.0.1:%d" % args.port
+    print("Bento at %s (Ctrl-C to stop)\nWorkspace: %s" % (url, home_dir()), flush=True)
+    threading.Thread(target=watch_workspace, daemon=True).start()
+    if not args.no_open:
+        webbrowser.open(url)
+    with contextlib.suppress(KeyboardInterrupt):
+        server.serve_forever()
+
+
+def build_parser():
+    who = argparse.ArgumentParser(add_help=False)
+    who.add_argument("--as", dest="who", default=os.environ.get("KB_AS"), help="your name")
+    where = argparse.ArgumentParser(add_help=False)
+    where.add_argument("--project", "-p", help="project (default: the connected folder you're in)")
+    where.add_argument("--all-projects", action="store_true", help="ignore the folder you're in")
+
+    parser = argparse.ArgumentParser(prog="kb", description="Bento: a kanban board and product docs in plain Markdown.")
+    parser.add_argument("--all", action="store_true", help="show all of Done")
+    parser.add_argument("--json", action="store_true", help="output JSON")
+    parser.add_argument("--project", "-p", help="show one project")
+    parser.add_argument("--kind", help="show one kind: implementation, testing, release or writing")
+    parser.set_defaults(func=cmd_list)
+    sub = parser.add_subparsers(title="commands", metavar="")
+
+    p = sub.add_parser("list", help="show the board, across projects")
+    p.add_argument("--all", action="store_true", help="show all of Done")
+    p.add_argument("--json", action="store_true", help="output JSON")
+    p.add_argument("--project", "-p", help="show one project")
+    p.add_argument("--kind", help="show one kind: implementation, testing, release or writing")
+    p.set_defaults(func=cmd_list)
+
+    p = sub.add_parser("next", parents=[who, where], help="best card for you; changes nothing")
+    p.add_argument("--json", action="store_true", help="output JSON")
+    p.set_defaults(func=cmd_next)
+
+    p = sub.add_parser("show", help="one card in full")
+    p.add_argument("id", type=int)
+    p.add_argument("--json", action="store_true", help="output JSON")
+    p.set_defaults(func=cmd_show)
+
+    p = sub.add_parser("claim", parents=[who, where], help="take cards from Next")
+    p.add_argument("ids", type=int, nargs="*")
+    p.add_argument("--also", action="store_true", help="take more while holding a card")
+    p.set_defaults(func=cmd_claim)
+
+    p = sub.add_parser("add", parents=[who], help="add an epic (to Backlog by default)")
+    p.add_argument("title")
+    p.add_argument("--for", dest="for_who", help="any (default), or a name")
+    p.add_argument("--project", "-p", help="project (default: the connected folder you're in)")
+    p.add_argument("--kind", help="implementation, testing, release, writing or milestone")
+    p.add_argument("--release", help="release this belongs to")
+    p.add_argument("--target", help="date for a milestone or release, such as 2026-12-01")
+    p.add_argument("--theme", help="the theme of a milestone or release")
+    p.add_argument("--source", help="doc it was pulled from, with an optional #heading")
+    p.add_argument("--plan", help="plan doc")
+    p.add_argument("--needs", help="card numbers this depends on, such as 3,4")
+    p.add_argument("--verifies", help="card numbers a testing epic checks")
+    p.add_argument("--done-when")
+    p.add_argument("--note")
+    p.add_argument("--to", help="column (default: Backlog; Milestones for milestones)")
+    p.add_argument("--top", action="store_true", help="put it at the top of the column")
+    p.set_defaults(func=cmd_add)
+
+    p = sub.add_parser("plan", help="start a plan or milestone doc")
+    p.add_argument("kind", help="implementation, testing, release, writing or milestone")
+    p.add_argument("title")
+    p.add_argument("--project", "-p", help="project (default: the connected folder you're in)")
+    p.add_argument("--epics", type=int, nargs="*", default=[], help="card numbers this plan covers")
+    p.set_defaults(func=cmd_plan)
+
+    p = sub.add_parser("push", aliases=["handoff"], parents=[who], help="hand epics, and optionally a plan, to someone")
+    p.add_argument("ids", type=int, nargs="+")
+    p.add_argument("--to", required=True, help="who takes it")
+    p.add_argument("--plan", help="plan doc")
+    p.add_argument("--wait", action="store_true", help="stay running until the work finishes or gets stuck")
+    p.set_defaults(func=cmd_handoff)
+
+    p = sub.add_parser("wait", help="sleep until epics reach Review, or one gets stuck; nothing polls")
+    p.add_argument("ids", type=int, nargs="+")
+    p.add_argument("--until", choices=["review", "done"], default="review")
+    p.add_argument("--timeout", type=float, help="give up after this many seconds")
+    p.set_defaults(func=cmd_wait)
+
+    p = sub.add_parser("wake", help="have this agent session hear when epics finish")
+    p.add_argument("ids", type=int, nargs="+")
+    p.set_defaults(func=cmd_wake)
+
+    p = sub.add_parser("service", help="run Bento in the background so sessions always hear back")
+    p.add_argument("action", choices=["install", "uninstall", "status"])
+    p.add_argument("--port", type=int, default=4747)
+    p.set_defaults(func=cmd_service)
+
+    p = sub.add_parser("move", parents=[who], help="move a card to a column")
+    p.add_argument("id", type=int)
+    p.add_argument("column")
+    p.add_argument("--top", action="store_true", help="put it at the top of the column")
+    p.set_defaults(func=cmd_move)
+
+    p = sub.add_parser("review", parents=[who], help="hand finished work to the owner")
+    p.add_argument("id", type=int)
+    p.add_argument("--note")
+    p.set_defaults(func=cmd_review)
+
+    p = sub.add_parser("delete", help="delete a card; it goes to TRASH.md")
+    p.add_argument("id", type=int)
+    p.set_defaults(func=cmd_delete)
+
+    p = sub.add_parser("restore", help="bring back a deleted card")
+    p.add_argument("id", type=int)
+    p.set_defaults(func=cmd_restore)
+
+    p = sub.add_parser("note", parents=[who], help="add a dated note")
+    p.add_argument("id", type=int)
+    p.add_argument("text")
+    p.set_defaults(func=cmd_note)
+
+    p = sub.add_parser("set", parents=[who], help="change or clear a card field")
+    p.add_argument("id", type=int)
+    p.add_argument("field", help="such as needs, release, plan or 'done when'")
+    p.add_argument("value", nargs="*", help="leave empty to clear it")
+    p.set_defaults(func=cmd_set)
+
+    p = sub.add_parser("block", help="flag a card as stuck")
+    p.add_argument("id", type=int)
+    p.add_argument("reason")
+    p.set_defaults(func=cmd_block)
+
+    p = sub.add_parser("unblock", help="clear a block")
+    p.add_argument("id", type=int)
+    p.set_defaults(func=cmd_unblock)
+
+    p = sub.add_parser("archive", help="move Done cards to ARCHIVE.md")
+    p.set_defaults(func=cmd_archive)
+
+    p = sub.add_parser("init", help="create a workspace for your board and docs")
+    p.add_argument("path", nargs="?", help="where it lives (default: ~/.bento)")
+    p.add_argument("--owner", help="your name on the board")
+    p.set_defaults(func=cmd_init)
+
+    p = sub.add_parser("connect", help="connect a project folder to Bento")
+    p.add_argument("path", nargs="?", help="folder (default: this one)")
+    p.add_argument("--name", help="project name (default: the folder's name)")
+    p.add_argument("--import-docs", action="store_true", help="also copy its docs into the workspace")
+    p.set_defaults(func=cmd_connect)
+
+    p = sub.add_parser("import", help="refresh docs from connected projects")
+    p.add_argument("project", nargs="?")
+    p.set_defaults(func=cmd_import)
+
+    p = sub.add_parser("projects", help="list connected projects")
+    p.set_defaults(func=cmd_projects)
+
+    p = sub.add_parser("docs", parents=[where], help="list product docs and plans")
+    p.add_argument("--long", action="store_true", help="list every doc")
+    p.add_argument("--json", action="store_true", help="output JSON")
+    p.set_defaults(func=cmd_docs)
+
+    p = sub.add_parser("calendar", help="what is meant to ship when, and how its dependencies stand")
+    p.add_argument("--project", "-p", help="show one project")
+    p.add_argument("--json", action="store_true", help="output JSON")
+    p.set_defaults(func=cmd_calendar)
+
+    p = sub.add_parser("report", help="track daily reports and where they arrive")
+    p.add_argument("action", choices=["list", "add", "post", "show", "rm"])
+    p.add_argument("name", nargs="?")
+    p.add_argument("file", nargs="?", help="for post: a Markdown file (default: stdin)")
+    p.add_argument("--thread", help="Codex thread id it arrives in")
+    p.add_argument("--link", help="any other address it arrives at")
+    p.add_argument("--project", "-p", help="project (default: the connected folder you're in)")
+    p.add_argument("--schedule", help="such as 'Daily at 2:00'")
+    p.add_argument("--json", action="store_true", help="output JSON")
+    p.set_defaults(func=cmd_report)
+
+    p = sub.add_parser("history", help="list local snapshots of the workspace")
+    p.add_argument("path", nargs="?", help="only snapshots that changed this file")
+    p.add_argument("--limit", type=int, default=20)
+    p.set_defaults(func=cmd_history)
+
+    p = sub.add_parser("rules", help="print how people and agents use the board")
+    p.set_defaults(func=cmd_rules)
+
+    p = sub.add_parser("install-agents", help="tell Claude Code and Codex about Bento")
+    p.set_defaults(func=cmd_install_agents)
+
+    p = sub.add_parser("serve", help="open the web board")
+    p.add_argument("--port", type=int, default=4747)
+    p.add_argument("--no-open", action="store_true", help="don't open a browser")
+    p.set_defaults(func=cmd_serve)
+    return parser
+
+
+def main():
+    args = build_parser().parse_args()
+    CTX.actor = (getattr(args, "who", None) or "").lower() or None
+    try:
+        args.func(args)
+    except KbError as e:
+        print("kb: %s" % e, file=sys.stderr)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bento Brand</title>
+<link rel="icon" href="favicon.svg">
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #FBF7EE; --col: #F2EBDC; --line: #E4DAC7; --ink: #2B2320; --muted: #6F6357; --accent: #47752F;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #1D1815; --col: #27211C; --line: #463C33; --ink: #F6EFE3; --muted: #B9AC9C; --accent: #A5D182; }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 16px/1.5 ui-sans-serif, -apple-system, "SF Pro Text", "Helvetica Neue", sans-serif;
+  }
+  main { max-width: 860px; margin: 0 auto; padding: 48px 24px 72px; display: grid; gap: 48px; }
+  .round { font-family: ui-rounded, "SF Pro Rounded", "Hiragino Maru Gothic ProN", system-ui, sans-serif; }
+  .hero { display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 32px; align-items: center; }
+  .hero img { width: 100%; display: block; }
+  h1 { margin: 0; font-size: clamp(56px, 11vw, 96px); line-height: 1; font-weight: 800; letter-spacing: -.02em; }
+  .tagline { margin: 12px 0 0; font-size: 20px; color: var(--muted); }
+  h2 { margin: 0 0 14px; font-size: 20px; font-weight: 750; }
+  p { margin: 0; max-width: 62ch; }
+  .sizes { display: flex; align-items: flex-end; gap: 22px; flex-wrap: wrap; }
+  .swatches { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px; }
+  .swatch { border: 1px solid var(--line); border-radius: 12px; overflow: hidden; font-size: 13px; }
+  .chip { height: 64px; }
+  .swatch div:last-child { padding: 8px 10px; }
+  .swatch b { display: block; font-weight: 650; }
+  .swatch span { color: var(--muted); font-size: 12px; }
+  table { width: 100%; border-collapse: collapse; }
+  td { padding: 9px 12px 9px 0; border-top: 1px solid var(--line); vertical-align: top; }
+  td:first-child { width: 130px; font-weight: 650; }
+  @media (max-width: 600px) {
+    .hero { grid-template-columns: minmax(0, 1fr); justify-items: start; }
+    .hero img { width: 180px; }
+  }
+</style>
+</head>
+<body>
+<main>
+  <section class="hero">
+    <img src="nori.svg" alt="Nori the hamster peeking over a red bento box, holding a small onigiri">
+    <div>
+      <h1 class="round">bento</h1>
+      <p class="tagline">A tidy little box for what's next.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2 class="round">Meet Nori</h2>
+    <p>Nori is a hamster who packs everything worth keeping into a very small box. The cheeks hold what's coming. The onigiri is the one thing being picked up right now. The five dots on the box are the five columns, with Next lit green, because that's the only one Nori is really looking at.</p>
+  </section>
+
+  <section>
+    <h2 class="round">Small sizes</h2>
+    <div class="sizes">
+      <img src="favicon.svg" width="16" height="16" alt="Nori's face at 16 pixels">
+      <img src="favicon.svg" width="32" height="32" alt="Nori's face at 32 pixels">
+      <img src="favicon.svg" width="64" height="64" alt="Nori's face at 64 pixels">
+      <img src="nori.svg" width="96" height="96" alt="Nori and the box at 96 pixels">
+    </div>
+  </section>
+
+  <section>
+    <h2 class="round">Colors</h2>
+    <div class="swatches">
+      <div class="swatch"><div class="chip" style="background:#FBF7EE"></div><div><b>Rice</b><span>#FBF7EE, page</span></div></div>
+      <div class="swatch"><div class="chip" style="background:#2B2320"></div><div><b>Soy</b><span>#2B2320, text</span></div></div>
+      <div class="swatch"><div class="chip" style="background:#47752F"></div><div><b>Edamame</b><span>#47752F, action</span></div></div>
+      <div class="swatch"><div class="chip" style="background:#C24E36"></div><div><b>Lacquer</b><span>#C24E36, the box</span></div></div>
+      <div class="swatch"><div class="chip" style="background:#F5CFA0"></div><div><b>Nori's fur</b><span>#F5CFA0, mascot only</span></div></div>
+      <div class="swatch"><div class="chip" style="background:#A23B1F"></div><div><b>Umeboshi</b><span>#A23B1F, blocked</span></div></div>
+    </div>
+  </section>
+
+  <section>
+    <h2 class="round">Voice</h2>
+    <table>
+      <tr><td>Backlog empty</td><td>Stash ideas here.</td></tr>
+      <tr><td>Next empty</td><td>Nothing packed yet. Drag something up from Backlog.</td></tr>
+      <tr><td>Doing empty</td><td>All paws free.</td></tr>
+      <tr><td>Keep it plain</td><td>One small wink per screen at most. Errors and blocked cards stay straightforward, so nobody has to decode a joke to know what's wrong.</td></tr>
+    </table>
+  </section>
+</main>
+</body>
+</html>

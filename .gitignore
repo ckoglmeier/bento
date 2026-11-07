@@ -1,0 +1,9 @@
+# Your board and docs belong in your workspace, not in this repo.
+BOARD.md
+ARCHIVE.md
+bento.json
+products/
+.board.lock
+.kb-*
+__pycache__/
+.DS_Store
