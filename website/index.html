@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bento</title>
+<meta name="description" content="The AI harness for people who think like a PM. Bento is a simple planning system and product-doc home that you and your agents can all read and write.">
+<link rel="canonical" href="https://buildwithbento.com/">
+<link rel="icon" href="favicon.svg">
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #FBF7EE; --line: #E4DAC7; --ink: #2B2320; --muted: #6F6357;
+    --action: #47752F; --on-action: #FFFFFF;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1D1815; --line: #463C33; --ink: #F6EFE3; --muted: #B9AC9C;
+      --action: #A5D182; --on-action: #1D1815;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100dvh; display: grid; grid-template-rows: 1fr auto;
+    background: var(--bg); color: var(--ink);
+    font: 18px/1.55 ui-sans-serif, -apple-system, "SF Pro Text", "Helvetica Neue", sans-serif;
+  }
+  main {
+    width: 100%; max-width: 880px; margin: 0 auto; padding: 48px 24px;
+    display: grid; grid-template-columns: 260px minmax(0, 1fr); gap: 48px; align-items: center;
+  }
+  main img { width: 100%; height: auto; display: block; }
+  h1 {
+    margin: 0; font-family: ui-rounded, "SF Pro Rounded", "Hiragino Maru Gothic ProN", system-ui, sans-serif;
+    font-size: clamp(56px, 11vw, 88px); line-height: 1; font-weight: 800; letter-spacing: -.02em;
+  }
+  .tagline { margin: 10px 0 0; font-size: 20px; color: var(--muted); }
+  .pitch { margin: 28px 0 0; font-size: clamp(22px, 3.4vw, 27px); line-height: 1.25; font-weight: 700; }
+  .what { margin: 12px 0 0; max-width: 46ch; }
+  .github {
+    display: inline-block; margin-top: 26px; padding: 12px 20px; border-radius: 10px;
+    background: var(--action); color: var(--on-action); font-weight: 650; text-decoration: none;
+  }
+  .github:hover { filter: brightness(1.08); }
+  .github:focus-visible { outline: 3px solid var(--ink); outline-offset: 3px; }
+  footer {
+    width: 100%; max-width: 880px; margin: 0 auto; padding: 18px 24px 28px;
+    border-top: 1px solid var(--line); color: var(--muted); font-size: 15px;
+  }
+  @media (max-width: 680px) {
+    main { grid-template-columns: minmax(0, 1fr); gap: 24px; padding: 32px 16px; }
+    main img { width: 170px; }
+    footer { padding-inline: 16px; }
+  }
+</style>
+</head>
+<body>
+<main>
+  <img src="nori.svg" width="260" height="260" alt="Nori the hamster peeking over a red bento box, holding a small onigiri">
+  <div>
+    <h1>bento</h1>
+    <p class="tagline">A tidy little box for what's next.</p>
+    <p class="pitch">The AI harness for people who think like a PM.</p>
+    <p class="what">Bento is a simple planning system and product-doc home that you and your agents can all read and write.</p>
+    <a class="github" href="https://github.com/ckoglmeier/bento">Get it on GitHub</a>
+  </div>
+</main>
+<footer>Open source under the MIT license.</footer>
+</body>
+</html>
