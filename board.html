@@ -294,7 +294,7 @@
 <script>
 const $ = (id) => document.getElementById(id);
 const EMPTY = {
-  Backlog: "Stash ideas here.",
+  Backlog: "Epics nobody has committed to yet.",
   Next: "Nothing packed yet. Drag something up from Backlog.",
   Doing: "All paws free.",
   Milestones: "No milestones yet.",
@@ -356,7 +356,7 @@ async function refresh(force) {
     renderFilters();
     render();
   } catch (e) {
-    $("error").textContent = e.message === "Failed to fetch" ? "Lost the server. Is kb serve running?" : e.message;
+    $("error").textContent = e.message === "Failed to fetch" ? "Lost the server. Check that kb serve is running." : e.message;
   }
 }
 
@@ -1236,7 +1236,7 @@ refresh(true);
 const stream = new EventSource("/api/stream");
 stream.onopen = () => refresh(true);
 stream.onmessage = () => refresh(false);
-stream.onerror = () => { $("error").textContent = "Lost the server. Is kb serve running?"; };
+stream.onerror = () => { $("error").textContent = "Lost the server. Check that kb serve is running."; };
 </script>
 </body>
 </html>
