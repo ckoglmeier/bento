@@ -2,6 +2,8 @@
 
 A tidy little box for what's next.
 
+![The Bento board showing epics to take up next and work ready to verify](website/board.png)
+
 ## Why this exists
 
 Bento is the AI harness for people who think like a PM. That's how I work. I'm the product person, and Claude Code and Codex are my builders and testers across several products at once. The tools for keeping that work straight didn't fit, so I built this.
@@ -28,65 +30,56 @@ Bento is a kanban board and product-doc home that you and your coding agents can
 - **Edit docs your way:** write on the board itself, or start a Codex or Claude Code thread on any doc.
 - **Scratchpad:** loose notes and ideas, any of which can become an epic.
 
+## Requirements
+
+- Python 3.9+ and git.
+- Claude Code, Codex, or both.
+- macOS. That's where Bento is built and tested. Linux is untested. Windows won't work, because Bento relies on Unix file locks.
+
 ## Setup
 
 ```bash
 git clone https://github.com/ckoglmeier/bento.git ~/bento
+mkdir -p ~/.local/bin
 ln -s ~/bento/kb ~/.local/bin/kb
 kb init ~/bento-data --owner yourname
 kb install-agents
 ```
 
-The tool and your data stay separate. This repo holds only code. Your board, docs, and plans live in a workspace folder on your machine. While it runs, Bento snapshots that folder to its own local git repo about once a minute. It never pushes those snapshots anywhere. `kb history` lists them.
+If your shell can't find `kb`, add that folder to your path and open a new terminal:
+
+```bash
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc
+```
+
+The tool and your data stay separate. This repo holds only code. Your board, docs, and plans live in a workspace folder on your machine. While it runs, Bento snapshots that folder to its own local git repo about once a minute. It never pushes those snapshots anywhere.
 
 `kb install-agents` adds a short marked section to `~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md`, and lets Codex's sandbox write to the workspace.
 
-## Connect your projects
+## First five minutes
+
+1. Connect a project and open the board:
+
+   ```bash
+   kb connect ~/code/my-app --import-docs
+   kb serve
+   ```
+
+2. In that project, ask Claude Code or Codex: "Read our backlog and add the next few epics to Bento." They land in Backlog.
+3. On the board, drag the one you want first into Next.
+4. Ask your agent "What's next?" It answers from the board and changes nothing. Tell it to pick the work up, and it claims the card and finishes into Review for you to check.
+
+## Update or remove
 
 ```bash
-kb connect ~/code/my-app --import-docs
+cd ~/bento && git pull
 ```
 
-This registers the project in your workspace and adds nothing to its repo. Bento recognizes the project by its git remote, so every clone and worktree is connected automatically. `--import-docs` copies Markdown from `docs/`, plus root files like `BACKLOG.md` and `ROADMAP.md`, from the default branch into `products/my-app/`.
+`kb uninstall-agents` removes what `kb install-agents` added and leaves your workspace alone. `kb service uninstall` stops the background service if you turned it on.
 
-Imported docs are a copy. Decide which version is the real one: keep editing in the workspace and leave a pointer in the repo, or re-run `kb import` to refresh. A re-import overwrites workspace edits to those files.
+## Docs
 
-## Use it
-
-```bash
-kb serve
-```
-
-Switch between Delivery, Calendar, Scratchpad, and Board, filter by project, read docs, pull items from a doc onto the board, and approve plans.
-
-Ask an agent "what's next?" from any connected project and it answers from the board. The rules agents follow are in [AGENTS.md](AGENTS.md), and `kb rules` prints them. `kb --help` lists every command.
-
-## Track recurring reports
-
-```bash
-kb report add "App daily usage" --thread <codex-thread-id> -p my-app --schedule "Daily at 2:00"
-```
-
-The Reports panel on the board links to each report's thread, filtered by project. A report job can also post a dated copy with `kb report post "App daily usage" report.md`, which keeps its history in `products/my-app/reports/` where people and agents can read it.
-
-## Hear back without polling
-
-```bash
-kb service install
-```
-
-This runs Bento in the background on macOS and starts it at login. An agent that pushes work hears back once when the whole set reaches Review, or right away if an epic gets blocked:
-
-- **Codex:** the service runs `codex exec resume` on the session that pushed.
-- **Claude Code:** the session runs `kb wait 12 13` as a background command, which sleeps on a kernel file event and wakes the session when it exits.
-
-The web board updates live the same way. On Linux, keep `kb serve --no-open` running yourself; `kb wait` and the board check once a second there.
-
-For your own alerts on a phone, Slack, or anything else, add a command to `bento.json` in your workspace. It receives the event as JSON on stdin, plus `$BENTO_TITLE` and `$BENTO_MESSAGE`:
-
-```json
-{ "notify": { "command": "curl -s -d \"$BENTO_MESSAGE\" https://ntfy.sh/your-private-topic" } }
-```
+The [docs](https://buildwithbento.com/docs) cover how the board works, plans, handoffs, hearing back without polling, milestones, recurring reports, and every command. The rules agents follow are in [AGENTS.md](AGENTS.md), and `kb rules` prints them.
 
 ## License
 

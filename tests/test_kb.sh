@@ -129,6 +129,19 @@ check "owner in block" "$(cat "$FAKE/.claude/CLAUDE.md")" "sam, Claude and Codex
 check "rules fill in owner" "$("$KB" rules)" "for sam, Claude and Codex"
 ls -a "$BENTO_HOME" | grep -q '^\.kb-' && { echo "FAIL temp files left"; fail=1; } || echo "ok   no temp files left"
 
+# Uninstalling undoes only what install added.
+check "uninstall reports removal" "$(HOME="$FAKE" "$KB" uninstall-agents)" "Removed Bento instructions from ~/.codex/AGENTS.md"
+check "own instructions survive uninstall" "$(cat "$FAKE/.codex/AGENTS.md")" "Keep this."
+checkn "block gone from codex" "$(cat "$FAKE/.codex/AGENTS.md")" "bento:start"
+[[ ! -e "$FAKE/.claude/CLAUDE.md" ]] && echo "ok   file holding only the block removed" || { echo "FAIL claude file left"; fail=1; }
+check "own config survives uninstall" "$(cat "$FAKE/.codex/config.toml")" 'model = "x"'
+checkn "codex root gone" "$(cat "$FAKE/.codex/config.toml")" "writable_roots"
+check "uninstall repeats safely" "$(HOME="$FAKE" "$KB" uninstall-agents)" "No Bento instructions in ~/.codex/AGENTS.md"
+check "workspace kept" "$(ls "$BENTO_HOME")" "BOARD.md"
+printf '[sandbox_workspace_write]\nnetwork_access = true\nwritable_roots = ["/a", "%s"]\n' "$(cd "$BENTO_HOME" && pwd -P)" > "$FAKE/.codex/config.toml"
+check "shared setting left to the user" "$(HOME="$FAKE" "$KB" uninstall-agents)" "yourself"
+check "shared setting not edited" "$(cat "$FAKE/.codex/config.toml")" "network_access = true"
+
 # Push and push back.
 export BENTO_HOME="$T/notify"
 "$KB" init "$BENTO_HOME" --owner sam >/dev/null

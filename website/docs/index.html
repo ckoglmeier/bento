@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bento Docs</title>
+<meta name="description" content="How to set up and use Bento: the board, epics, plans, agent handoffs, hearing back without polling, milestones, recurring reports, and every command.">
+<link rel="canonical" href="https://buildwithbento.com/docs">
+<link rel="icon" href="/favicon.svg">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Bento">
+<meta property="og:title" content="Bento Docs">
+<meta property="og:description" content="How to set up and use Bento, the AI harness for people who think like a PM.">
+<meta property="og:url" content="https://buildwithbento.com/docs">
+<meta property="og:image" content="https://buildwithbento.com/banner.png">
+<meta name="twitter:card" content="summary_large_image">
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #FBF7EE; --panel: #F2EBDC; --line: #E4DAC7; --ink: #2B2320; --muted: #6F6357; --link: #47752F;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #1D1815; --panel: #27211C; --line: #463C33; --ink: #F6EFE3; --muted: #B9AC9C; --link: #A5D182; }
+  }
+  * { box-sizing: border-box; }
+  html { scroll-padding-top: 16px; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 17px/1.6 ui-sans-serif, -apple-system, "SF Pro Text", "Helvetica Neue", sans-serif;
+  }
+  a { color: var(--link); }
+  header { max-width: 1040px; margin: 0 auto; padding: 22px 24px 0; display: flex; align-items: center; gap: 12px; }
+  .brand {
+    display: flex; align-items: center; gap: 10px; color: var(--ink); text-decoration: none;
+    font-family: ui-rounded, "SF Pro Rounded", "Hiragino Maru Gothic ProN", system-ui, sans-serif; font-size: 26px; font-weight: 800;
+  }
+  header .github { margin-left: auto; }
+  .layout {
+    max-width: 1040px; margin: 0 auto; padding: 32px 24px 72px;
+    display: grid; grid-template-columns: 190px minmax(0, 1fr); gap: 48px; align-items: start;
+  }
+  nav { position: sticky; top: 16px; display: grid; gap: 4px; font-size: 15px; }
+  nav a { color: var(--muted); text-decoration: none; padding: 2px 0; }
+  nav a:hover { color: var(--ink); }
+  h1 { margin: 0 0 8px; font-size: clamp(32px, 6vw, 42px); line-height: 1.1; font-weight: 800; }
+  h2 { margin: 44px 0 10px; padding-top: 22px; border-top: 1px solid var(--line); font-size: 24px; line-height: 1.2; }
+  h3 { margin: 24px 0 6px; font-size: 18px; }
+  p, ul, ol { margin: 10px 0; }
+  li { margin: 5px 0; }
+  .lede { color: var(--muted); font-size: 19px; margin-top: 0; }
+  code { font: .88em ui-monospace, "SF Mono", Menlo, monospace; background: var(--panel); padding: .1em .32em; border-radius: 4px; }
+  pre { margin: 12px 0; padding: 14px 16px; background: var(--panel); border-radius: 10px; overflow-x: auto; font-size: 15px; line-height: 1.5; }
+  pre code { background: none; padding: 0; font-size: inherit; }
+  .table { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 16px; }
+  th, td { text-align: left; vertical-align: top; padding: 8px 14px 8px 0; border-top: 1px solid var(--line); }
+  th { border-top: 0; font-weight: 650; }
+  td:first-child { white-space: nowrap; }
+  @media (max-width: 760px) {
+    header { padding: 18px 16px 0; }
+    .layout { grid-template-columns: minmax(0, 1fr); gap: 20px; padding: 20px 16px 56px; }
+    nav { position: static; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 2px 16px; padding-bottom: 16px; border-bottom: 1px solid var(--line); }
+  }
+</style>
+</head>
+<body>
+<header>
+  <a class="brand" href="/"><img src="/favicon.svg" width="30" height="30" alt="">bento</a>
+  <a class="github" href="https://github.com/ckoglmeier/bento">GitHub</a>
+</header>
+<div class="layout">
+  <nav aria-label="On this page">
+    <a href="#setup">Setup</a>
+    <a href="#first-five-minutes">First five minutes</a>
+    <a href="#how-it-works">How it works</a>
+    <a href="#the-board">The board</a>
+    <a href="#docs-and-plans">Docs and plans</a>
+    <a href="#handoffs">Handoffs</a>
+    <a href="#hear-back">Hearing back</a>
+    <a href="#milestones">Milestones</a>
+    <a href="#reports">Recurring reports</a>
+    <a href="#commands">Commands</a>
+    <a href="#update-or-remove">Update or remove</a>
+  </nav>
+  <main>
+    <h1>Docs</h1>
+    <p class="lede">Set up Bento, connect a project, and run your work through it with Claude Code and Codex.</p>
+
+    <h2 id="setup" style="border-top:0;margin-top:20px;padding-top:0">Setup</h2>
+    <p>You need Python 3.9+ and git, plus Claude Code, Codex, or both. Bento is built and tested on macOS. Linux is untested. Windows won't work, because Bento relies on Unix file locks.</p>
+<pre><code>git clone https://github.com/ckoglmeier/bento.git ~/bento
+mkdir -p ~/.local/bin
+ln -s ~/bento/kb ~/.local/bin/kb
+kb init ~/bento-data --owner yourname
+kb install-agents</code></pre>
+    <p>If your shell can't find <code>kb</code>, add that folder to your path and open a new terminal:</p>
+<pre><code>echo 'export PATH="$HOME/.local/bin:$PATH"' &gt;&gt; ~/.zshrc</code></pre>
+    <p>The repo holds only code. Your board, docs, and plans live in the workspace folder on your machine. While it runs, Bento snapshots that folder to its own local git repo about once a minute, and <code>kb history</code> lists the snapshots. It never pushes them anywhere.</p>
+    <p><code>kb install-agents</code> adds a short marked section to <code>~/.claude/CLAUDE.md</code> and <code>~/.codex/AGENTS.md</code>, and lets Codex's sandbox write to the workspace.</p>
+
+    <h2 id="first-five-minutes">First five minutes</h2>
+    <ol>
+      <li>Connect a project and open the board:
+<pre><code>kb connect ~/code/my-app --import-docs
+kb serve</code></pre></li>
+      <li>In that project, ask Claude Code or Codex: "Read our backlog and add the next few epics to Bento." They land in Backlog.</li>
+      <li>On the board, drag the one you want first into Next.</li>
+      <li>Ask your agent "What's next?" It answers from the board and changes nothing. Tell it to pick the work up, and it claims the card and finishes into Review for you to check.</li>
+    </ol>
+
+    <h2 id="how-it-works">How it works</h2>
+    <p>Every card is an <strong>epic</strong>: a meaningful group of work with one clear "done when". Small tasks go inside the epic's plan, not on the board.</p>
+    <p>The rules are short. Asking "what's next?" only reads. Agents claim a card before they start, finish into Review, and never move a card to Done. That call is yours. Agents put new work they notice in Backlog and don't start it. If one is stuck on a real decision, it blocks the card and tells you.</p>
+    <p>Agents get these rules from <code>kb rules</code>, which prints <a href="https://github.com/ckoglmeier/bento/blob/main/AGENTS.md">AGENTS.md</a>. Claiming is atomic, so two agents can't take the same card.</p>
+
+    <h2 id="the-board">The board</h2>
+    <p><code>kb serve</code> opens the board at <code>http://127.0.0.1:4747</code>. It has four views:</p>
+    <ul>
+      <li><strong>Delivery:</strong> what to take up next, what each item still needs from you, and what is ready to verify.</li>
+      <li><strong>Calendar:</strong> milestones across projects, and how the work feeding each one stands. Drag a milestone onto a date to move it.</li>
+      <li><strong>Scratchpad:</strong> loose notes and ideas. Agents never pick these up, and any of them can become an epic.</li>
+      <li><strong>Board:</strong> the kanban columns.</li>
+    </ul>
+    <div class="table"><table>
+      <tr><th>Column</th><th>Meaning</th><th>Who puts cards here</th></tr>
+      <tr><td>Backlog</td><td>Epics nobody has committed to</td><td>Anyone</td></tr>
+      <tr><td>Next</td><td>Committed work. The top card goes first.</td><td>You, or a handoff you asked for</td></tr>
+      <tr><td>Doing</td><td>Someone is working on it</td><td>Whoever claims it</td></tr>
+      <tr><td>Review</td><td>Finished, waiting for you to check</td><td>Whoever did the work</td></tr>
+      <tr><td>Done</td><td>You accepted it</td><td>You only</td></tr>
+    </table></div>
+
+    <h2 id="docs-and-plans">Docs and plans</h2>
+    <p>Connecting a project registers it in your workspace and adds nothing to its repo. Bento recognizes the project by its git remote, so every clone and worktree is connected automatically. <code>--import-docs</code> copies Markdown from <code>docs/</code>, plus root files like <code>BACKLOG.md</code> and <code>ROADMAP.md</code>, from the default branch into <code>products/my-app/</code>.</p>
+    <p>Imported docs are a copy. Decide which version is the real one: keep editing in the workspace and leave a pointer in the repo, or re-run <code>kb import</code> to refresh. A re-import overwrites workspace edits to those files.</p>
+    <p>Pull only what's worth doing soon onto the board. The <code>--source</code> flag points back to where the detail lives:</p>
+<pre><code>kb add "Saved searches" --source docs/BACKLOG.md#release-1 --release "Release 1" --done-when "..."</code></pre>
+    <p>An epic can have one of four kinds of plan, which you can read, approve, or request changes on from the board:</p>
+    <div class="table"><table>
+      <tr><th>Kind</th><th>Covers</th></tr>
+      <tr><td><code>implementation</code></td><td>Building something</td></tr>
+      <tr><td><code>testing</code></td><td>Verifying built epics as a group. It can't start until they reach Review.</td></tr>
+      <tr><td><code>release</code></td><td>Shipping a set of epics, with its exit gate and rollback</td></tr>
+      <tr><td><code>writing</code></td><td>A piece of writing, often timed to warm up an audience before a release</td></tr>
+    </table></div>
+<pre><code>kb plan testing "Search" --epics 14</code></pre>
+    <p>On the board you can edit any doc in place, or start a Codex or Claude Code thread on it.</p>
+
+    <h2 id="handoffs">Handoffs</h2>
+    <p>Iterate with one agent, then hand epics and a plan to another:</p>
+<pre><code>kb plan implementation "Search" --epics 12 13
+kb handoff 12 13 --to claude --plan products/my-app/plans/implementation-search.md --as codex</code></pre>
+    <p>The receiver runs <code>kb claim 12 13 --as claude</code>, reads the plan, and follows it. Handing off doesn't start an agent. Someone still has to ask it to pick the work up.</p>
+
+    <h2 id="hear-back">Hearing back without polling</h2>
+<pre><code>kb service install</code></pre>
+    <p>This runs Bento in the background on macOS and starts it at login. An agent that pushes work hears back once when the whole set reaches Review, or right away if an epic gets blocked:</p>
+    <ul>
+      <li><strong>Codex:</strong> the service runs <code>codex exec resume</code> on the session that pushed.</li>
+      <li><strong>Claude Code:</strong> the session runs <code>kb wait 12 13</code> as a background command, which sleeps on a kernel file event and wakes the session when it exits.</li>
+    </ul>
+    <p>The web board updates live the same way. For your own alerts on a phone, Slack, or anything else, add a command to <code>bento.json</code> in your workspace. It receives the event as JSON on stdin, plus <code>$BENTO_TITLE</code> and <code>$BENTO_MESSAGE</code>:</p>
+<pre><code>{ "notify": { "command": "curl -s -d \"$BENTO_MESSAGE\" https://ntfy.sh/your-private-topic" } }</code></pre>
+
+    <h2 id="milestones">Milestones</h2>
+    <p>Dates belong on milestones and releases, not on ordinary epics. A milestone is a named moment with one date, such as a launch or a publish date. Epics feed it through <code>needs</code>, and milestones in different projects can depend on each other.</p>
+<pre><code>kb add "Essay publishes" --kind milestone -p writing --target 2026-12-01 --needs 12,13</code></pre>
+    <p>Each one can have a doc with its theme, acceptance criteria, and release notes. Start one with <code>kb plan milestone "Essay publishes" --epics 14</code>. A milestone is at risk if a dependency is blocked, a dependency is dated after it, or dependencies are open with 7 days or fewer left.</p>
+
+    <h2 id="reports">Recurring reports</h2>
+<pre><code>kb report add "App daily usage" --thread &lt;codex-thread-id&gt; -p my-app --schedule "Daily at 2:00"</code></pre>
+    <p>The Reports panel on the board links to each report's thread, filtered by project. A report job can also post a dated copy with <code>kb report post "App daily usage" report.md</code>, which keeps its history in <code>products/my-app/reports/</code> where people and agents can read it.</p>
+
+    <h2 id="commands">Commands</h2>
+    <p><code>kb --help</code> lists everything. These are the ones you'll use most:</p>
+<pre><code>kb                               the board across projects (-p my-app, --kind testing, --all, --json)
+kb next --as codex               best card for you, changes nothing
+kb show 12                       one card in full
+kb claim --as codex              take the best card (or: kb claim 12 13 --as codex)
+kb add "title" --done-when "..."  add an epic to Backlog
+kb add "title" --to scratchpad   save a note or idea
+kb plan testing "Search" --epics 14
+kb push 12 13 --to claude        hand epics over, with or without a plan
+kb wait 12 13                    sleep until they reach Review or get stuck
+kb wake 12 13                    have this Codex session resumed when they finish
+kb set 12 needs "#9"             change a field
+kb note 12 "text" --as codex     add a dated note
+kb block 12 "reason"             flag a card as stuck (kb unblock 12 clears it)
+kb review 12 --as codex --note "text"
+kb move 12 next --top            move or release a card
+kb delete 12                     move a card to TRASH.md (kb restore 12 undoes it)
+kb calendar                      milestones and their dependencies
+kb docs                          product docs and plans
+kb projects                      connected projects
+kb archive                       move Done cards to ARCHIVE.md
+kb history                       local snapshots of your workspace
+kb serve                         open the web board</code></pre>
+
+    <h2 id="update-or-remove">Update or remove</h2>
+<pre><code>cd ~/bento &amp;&amp; git pull</code></pre>
+    <p><code>kb uninstall-agents</code> removes what <code>kb install-agents</code> added and leaves your workspace alone. <code>kb service uninstall</code> stops the background service if you turned it on.</p>
+  </main>
+</div>
+</body>
+</html>

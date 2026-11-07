@@ -1561,6 +1561,47 @@ def cmd_install_agents(args):
         print("Let Codex write to %s in ~/.codex/config.toml" % home_dir())
 
 
+def save_or_remove(path, text):
+    """Write what's left of a file, or remove it if Bento's part was all it held."""
+    path = os.path.realpath(path)
+    if text.strip():
+        atomic_write(path, text.strip("\n") + "\n")
+    else:
+        os.remove(path)
+
+
+def remove_block(path):
+    if not os.path.exists(path):
+        return False
+    with open(path, encoding="utf-8") as f:
+        text = f.read()
+    if BLOCK_START not in text or BLOCK_END not in text:
+        return False
+    head, rest = text.split(BLOCK_START, 1)
+    tail = rest.split(BLOCK_END, 1)[1]
+    gap = "\n\n" if head.strip() and tail.strip() else ""
+    save_or_remove(path, head.rstrip("\n") + gap + tail.lstrip("\n"))
+    return True
+
+
+def cmd_uninstall_agents(args):
+    home = os.path.expanduser("~")
+    for label, path in (("~/.claude/CLAUDE.md", os.path.join(home, ".claude", "CLAUDE.md")),
+                        ("~/.codex/AGENTS.md", os.path.join(home, ".codex", "AGENTS.md"))):
+        print("Removed Bento instructions from %s" % label if remove_block(path) else "No Bento instructions in %s" % label)
+    config = os.path.join(home, ".codex", "config.toml")
+    if os.path.exists(config):
+        with open(config, encoding="utf-8") as f:
+            text = f.read()
+        added = '[sandbox_workspace_write]\nwritable_roots = ["%s"]\n' % home_dir()
+        if added in text:
+            save_or_remove(config, text.replace(added, ""))
+            print("Removed %s from Codex's writable folders in ~/.codex/config.toml" % home_dir())
+        elif home_dir() in text:
+            print("Remove %s from writable_roots in ~/.codex/config.toml yourself. That setting has other entries." % home_dir())
+    print("Your workspace at %s is untouched. If the background service is on, kb service uninstall stops it." % home_dir())
+
+
 # ---- Local web board --------------------------------------------------------
 
 
@@ -1987,6 +2028,9 @@ def build_parser():
 
     p = sub.add_parser("install-agents", help="tell Claude Code and Codex about Bento")
     p.set_defaults(func=cmd_install_agents)
+
+    p = sub.add_parser("uninstall-agents", help="undo install-agents; your workspace stays")
+    p.set_defaults(func=cmd_uninstall_agents)
 
     p = sub.add_parser("serve", help="open the web board")
     p.add_argument("--port", type=int, default=4747)

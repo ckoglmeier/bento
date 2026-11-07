@@ -7,6 +7,29 @@
 <meta name="description" content="The AI harness for people who think like a PM. Bento is a simple planning system and product-doc home that you and your agents can all read and write.">
 <link rel="canonical" href="https://buildwithbento.com/">
 <link rel="icon" href="favicon.svg">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Bento">
+<meta property="og:title" content="Bento: the AI harness for people who think like a PM">
+<meta property="og:description" content="Bento is a simple planning system and product-doc home that you and your agents can all read and write. Open source.">
+<meta property="og:url" content="https://buildwithbento.com/">
+<meta property="og:image" content="https://buildwithbento.com/banner.png">
+<meta property="og:image:width" content="2400">
+<meta property="og:image:height" content="1254">
+<meta property="og:image:alt" content="Nori the hamster beside the Bento name and the line: The AI harness for people who think like a PM.">
+<meta name="twitter:card" content="summary_large_image">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "name": "Bento",
+  "url": "https://buildwithbento.com/",
+  "description": "The AI harness for people who think like a PM. A simple planning system and product-doc home that you and your agents can all read and write.",
+  "applicationCategory": "DeveloperApplication",
+  "operatingSystem": "macOS",
+  "license": "https://opensource.org/licenses/MIT",
+  "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" }
+}
+</script>
 <style>
   :root {
     color-scheme: light dark;
@@ -21,7 +44,7 @@
   }
   * { box-sizing: border-box; }
   body {
-    margin: 0; min-height: 100dvh; display: grid; grid-template-rows: 1fr auto;
+    margin: 0; min-height: 100dvh; display: grid; grid-template-rows: auto auto 1fr;
     background: var(--bg); color: var(--ink);
     font: 18px/1.55 ui-sans-serif, -apple-system, "SF Pro Text", "Helvetica Neue", sans-serif;
   }
@@ -37,10 +60,14 @@
   .tagline { margin: 10px 0 0; font-size: 20px; color: var(--muted); }
   .pitch { margin: 28px 0 0; font-size: clamp(22px, 3.4vw, 27px); line-height: 1.25; font-weight: 700; }
   .what { margin: 12px 0 0; max-width: 46ch; }
+  .actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 22px; margin-top: 26px; }
   .github {
-    display: inline-block; margin-top: 26px; padding: 12px 20px; border-radius: 10px;
+    display: inline-block; padding: 12px 20px; border-radius: 10px;
     background: var(--action); color: var(--on-action); font-weight: 650; text-decoration: none;
   }
+  .docs { color: var(--ink); font-weight: 650; }
+  .shot { width: 100%; max-width: 1120px; margin: 0 auto; padding: 0 24px 48px; }
+  .shot img { width: 100%; height: auto; display: block; border: 1px solid var(--line); border-radius: 12px; }
   .github:hover { filter: brightness(1.08); }
   .github:focus-visible { outline: 3px solid var(--ink); outline-offset: 3px; }
   footer {
@@ -50,6 +77,7 @@
   @media (max-width: 680px) {
     main { grid-template-columns: minmax(0, 1fr); gap: 24px; padding: 32px 16px; }
     main img { width: 170px; }
+    .shot { padding: 0 16px 32px; }
     footer { padding-inline: 16px; }
   }
 </style>
@@ -62,9 +90,15 @@
     <p class="tagline">A tidy little box for what's next.</p>
     <p class="pitch">The AI harness for people who think like a PM.</p>
     <p class="what">Bento is a simple planning system and product-doc home that you and your agents can all read and write.</p>
-    <a class="github" href="https://github.com/ckoglmeier/bento">Get it on GitHub</a>
+    <div class="actions">
+      <a class="github" href="https://github.com/ckoglmeier/bento">Get it on GitHub</a>
+      <a class="docs" href="/docs">Read the docs</a>
+    </div>
   </div>
 </main>
+<section class="shot">
+  <img src="board.png" width="2240" height="1400" alt="The Bento board's Delivery view, with epics to take up next and work ready to verify">
+</section>
 <footer>Open source under the MIT license.</footer>
 </body>
 </html>
