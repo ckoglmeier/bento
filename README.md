@@ -74,10 +74,6 @@ For your own alerts on a phone, Slack or anything else, add a command to `bento.
 { "notify": { "command": "curl -s -d \"$BENTO_MESSAGE\" https://ntfy.sh/your-private-topic" } }
 ```
 
-## How it compares
-
-If you want a fast shared kanban for people and agents, look at [Kanzo](https://github.com/emanuele-em/kanzo). Bento is for the planning around the board: Markdown as the source of truth, docs outside your repos, plan review, milestones across projects, and sessions that hear back when work finishes. It's early, and it's currently built and tested on macOS.
-
 ## License
 
 [MIT](LICENSE)
