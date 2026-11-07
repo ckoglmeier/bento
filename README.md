@@ -2,6 +2,20 @@
 
 A tidy little box for what's next.
 
+## Why this exists
+
+I build several products at once with Claude Code and Codex. The tools for keeping that work straight didn't fit, so I built this.
+
+- **Trackers are too much.** Linear is built for teams. A person and a few agents need a queue everyone can read, not a system to administer.
+- **Agents don't share a queue.** A Claude session can't see what a Codex session picked up. Someone has to keep the order in their head, and that someone was me.
+- **Handoffs have no home.** I often iterate in Codex, then hand a set of epics to Claude with an implementation doc. That handoff shouldn't depend on me copying text between windows.
+- **Checking on agents is a chore.** Work finishes while I'm elsewhere, and nobody tells the session that was waiting. A session should hear back when the work is done, without polling.
+- **Product docs drift.** Backlogs and release plans live in each repo, with a copy in every worktree and branch. One of my backlogs still listed shipped work as unmerged.
+- **My own tracking was on paper.** Sticky notes don't show up next to the work, and agents can't read them.
+- **Release dates don't line up.** I often time writing to warm up an audience before a product release. Working backward takes apps and writing on one calendar, with dependencies you can see.
+
+## What it is
+
 Bento is a kanban board and product-doc home that you and your coding agents can all read and write. It's plain Markdown on your own machine, with one small script and a web board. No accounts, servers or dependencies beyond Python 3.9+ and git.
 
 - **One view across projects**, filterable down to one.
