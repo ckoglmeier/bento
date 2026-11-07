@@ -62,8 +62,10 @@ The tool and your data stay separate. This repo holds only code. Your board, doc
 
    ```bash
    kb connect ~/code/my-app --import-docs
-   kb serve
+   kb open
    ```
+
+   Later, `kb open` or telling your agent "open bento" brings the board back up. Saying "note for bento" saves a summary of the discussion to your Scratchpad.
 
 2. In that project, ask Claude Code or Codex: "Read our backlog and add the next few epics to Bento." They land in Backlog.
 3. On the board, drag the one you want first into Next.

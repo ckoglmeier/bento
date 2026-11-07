@@ -1523,6 +1523,8 @@ def agent_block(name):
         "%s, Claude and Codex share a work queue and product docs in Bento, through the `kb` command, from any project. Your name on it is `%s`." % (owner(), name),
         "",
         "- When %s asks what's next, run `kb next --as %s` and answer from it. That only reads; don't claim anything unless asked to do the work." % (owner(), name),
+        "- When %s says \"open bento\", run `kb open`. It opens the board in the browser." % owner(),
+        "- When %s says \"note for bento\", save the discussion as a Scratchpad note: `kb add \"<short title>\" --to scratchpad --as %s --note \"<a few sentences: what was decided, open questions, next steps>\"`. Use only what was said, and don't start any work from it." % (owner(), name),
         "- Before you change the board or write a plan, run `kb rules` and follow them.",
         "- Product docs live in `%s/products/`, not in the project repo. Run `kb docs` to find them." % home_dir(),
         BLOCK_END,
@@ -1856,6 +1858,31 @@ def cmd_serve(args):
         server.serve_forever()
 
 
+def board_running(url):
+    with contextlib.suppress(OSError, ValueError):
+        with urllib.request.urlopen(url + "/api/board", timeout=2) as res:
+            json.load(res)
+        return True
+    return False
+
+
+def cmd_open(args):
+    url = "http://127.0.0.1:%d" % args.port
+    if not board_running(url):
+        proc = subprocess.Popen(
+            [sys.executable, os.path.realpath(__file__), "serve", "--no-open", "--port", str(args.port)],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
+        )
+        deadline = time.time() + 10
+        while not board_running(url):
+            if proc.poll() is not None or time.time() > deadline:
+                raise KbError("Couldn't start the board on port %d. Run kb serve to see why." % args.port)
+            time.sleep(0.2)
+        print("Started Bento in the background (pid %d). kb service install keeps it running at login." % proc.pid)
+    webbrowser.open(url)
+    print("Opened %s" % url)
+
+
 def build_parser():
     who = argparse.ArgumentParser(add_help=False)
     who.add_argument("--as", dest="who", default=os.environ.get("KB_AS"), help="your name")
@@ -2038,6 +2065,10 @@ def build_parser():
     p.add_argument("--port", type=int, default=4747)
     p.add_argument("--no-open", action="store_true", help="don't open a browser")
     p.set_defaults(func=cmd_serve)
+
+    p = sub.add_parser("open", help="open the web board, starting it if needed")
+    p.add_argument("--port", type=int, default=4747)
+    p.set_defaults(func=cmd_open)
     return parser
 
 

@@ -128,6 +128,8 @@ check "existing instructions kept" "$(cat "$FAKE/.codex/AGENTS.md")" "Keep this.
 [[ $(grep -c 'bento:start' "$FAKE/.codex/AGENTS.md") == 1 ]] && echo "ok   block not duplicated" || { echo "FAIL duplicated block"; fail=1; }
 [[ $(grep -c 'writable_roots' "$FAKE/.codex/config.toml") == 1 ]] && echo "ok   codex root added once" || { echo "FAIL codex root"; fail=1; }
 check "owner in block" "$(cat "$FAKE/.claude/CLAUDE.md")" "sam, Claude and Codex"
+check "block knows open bento" "$(cat "$FAKE/.claude/CLAUDE.md")" 'says "open bento", run `kb open`'
+check "block knows note for bento" "$(cat "$FAKE/.codex/AGENTS.md")" "--to scratchpad --as codex"
 check "rules fill in owner" "$("$KB" rules)" "for sam, Claude and Codex"
 ls -a "$BENTO_HOME" | grep -q '^\.kb-' && { echo "FAIL temp files left"; fail=1; } || echo "ok   no temp files left"
 
@@ -159,6 +161,17 @@ S1=$!
 S2=$!
 sleep 1
 check "second serve on a used port just reports" "$("$KB" serve --port 47470 --no-open)" "already running"
+
+# kb open starts the board when it isn't running, then just opens it.
+OPENED=$(BROWSER=true "$KB" open --port 47479)
+check "open starts the board" "$OPENED" "Started Bento in the background"
+check "open opens the board" "$OPENED" "Opened http://127.0.0.1:47479"
+check "board answers after open" "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:47479/api/board)" "200"
+AGAIN=$(BROWSER=true "$KB" open --port 47479)
+check "open reuses a running board" "$AGAIN" "Opened"
+checkn "open doesn't start a second board" "$AGAIN" "Started"
+check "open agrees with serve on a running board" "$(BROWSER=true "$KB" open --port 47470)" "Opened http://127.0.0.1:47470"
+kill "$(print -r -- "$OPENED" | grep -oE 'pid [0-9]+' | cut -d' ' -f2)" 2>/dev/null
 curl -sN --max-time 3 http://127.0.0.1:47470/api/stream > "$T/stream.txt" &
 CURL=$!
 sleep 0.5

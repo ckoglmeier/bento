@@ -106,7 +106,7 @@ kb install-agents</code></pre>
     <ol>
       <li>Connect a project and open the board:
 <pre><code>kb connect ~/code/my-app --import-docs
-kb serve</code></pre></li>
+kb open</code></pre></li>
       <li>In that project, ask Claude Code or Codex: "Read our backlog and add the next few epics to Bento." They land in Backlog.</li>
       <li>On the board, drag the one you want first into Next.</li>
       <li>Ask your agent "What's next?" It answers from the board and changes nothing. Tell it to pick the work up, and it claims the card and finishes into Review for you to check.</li>
@@ -118,11 +118,11 @@ kb serve</code></pre></li>
     <p>Agents get these rules from <code>kb rules</code>, which prints <a href="https://github.com/ckoglmeier/bento/blob/main/AGENTS.md">AGENTS.md</a>. Claiming is atomic, so two agents can't take the same card.</p>
 
     <h2 id="the-board">The board</h2>
-    <p><code>kb serve</code> opens the board at <code>http://127.0.0.1:4747</code>. It has four views:</p>
+    <p><code>kb open</code> opens the board at <code>http://127.0.0.1:4747</code>, and starts it in the background if it isn't running. You can also tell your agent "open bento". The board has four views:</p>
     <ul>
       <li><strong>Delivery:</strong> what to take up next, what each item still needs from you, and what is ready to verify.</li>
       <li><strong>Calendar:</strong> milestones across projects, and how the work feeding each one stands. Drag a milestone onto a date to move it.</li>
-      <li><strong>Scratchpad:</strong> loose notes and ideas. Agents never pick these up, and any of them can become an epic.</li>
+      <li><strong>Scratchpad:</strong> loose notes and ideas. Agents never pick these up, and any of them can become an epic. Say "note for bento" in Claude Code or Codex, and the agent saves a short summary of the discussion here.</li>
       <li><strong>Board:</strong> the kanban columns.</li>
     </ul>
     <div class="table"><table>
@@ -198,7 +198,8 @@ kb docs                          product docs and plans
 kb projects                      connected projects
 kb archive                       move Done cards to ARCHIVE.md
 kb history                       local snapshots of your workspace
-kb serve                         open the web board</code></pre>
+kb open                          open the web board, starting it if needed
+kb serve                         run the web board in this terminal</code></pre>
 
     <h2 id="update-or-remove">Update or remove</h2>
 <pre><code>cd ~/bento &amp;&amp; git pull</code></pre>

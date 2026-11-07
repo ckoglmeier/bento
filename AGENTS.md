@@ -110,7 +110,8 @@ kb calendar                      milestones and their dependencies (-p my-app, -
 kb docs                          product docs and plans (--long, --all-projects)
 kb projects                      connected projects
 kb archive                       move Done cards to ARCHIVE.md
-kb serve                         open the web board at http://127.0.0.1:4747
+kb open                          open the web board, starting it if needed
+kb serve                         run the web board at http://127.0.0.1:4747
 ```
 
 ## Card format
