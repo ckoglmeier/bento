@@ -71,6 +71,8 @@
   .item .meta { margin-top: 2px; }
   .item-why { overflow-wrap: anywhere; }
   .item-why.is-warn { color: var(--warn); }
+  .item-links { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 4px; }
+  .item-link { background: none; border: 0; padding: 0; font-size: 12px; color: var(--accent); text-decoration: underline; text-underline-offset: 2px; overflow-wrap: anywhere; text-align: left; }
   .item-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
   .item-actions .plain, .item-actions .solid { padding: 4px 10px; font-size: 13px; }
   .item-actions kbd { margin-left: 5px; }
@@ -589,6 +591,7 @@ const INBOX_DO = {
   "done-when": [["Add done-when", "donewhen"]],
   scratchpad: [["Make it an epic", "promote"], ["Finish", "finish"]],
   yours: [["Open", "open"]],
+  milestones: [["Mark reached", "accept"], ["Open", "open"]],
 };
 const REPLY = {
   answer: "Your answer, or leave it empty. Return sends it and clears the block.",
@@ -664,6 +667,30 @@ function inboxDo(item, verb) {
   if (verb === "open") return openItem(item);
 }
 
+// Where to check the work: web links open in a new tab, workspace docs open in the reader.
+function itemLinks(item) {
+  const row = el("span", "item-links");
+  const docLink = (label, path) => {
+    const b = button("item-link", label, (e) => { e.stopPropagation(); openDoc(path, /\/plans\//.test(path)); });
+    row.append(b);
+  };
+  (item.links || []).forEach((link) => {
+    if (/^https?:\/\//i.test(link)) {
+      const a = el("a", "item-link", link.replace(/^https?:\/\//i, "").replace(/\/$/, ""));
+      a.href = link;
+      a.target = "_blank";
+      a.rel = "noopener noreferrer";
+      a.addEventListener("click", (e) => e.stopPropagation());
+      row.append(a);
+    } else {
+      docLink(link.split("/").pop(), link);
+    }
+  });
+  if (item.source && !(item.links || []).includes(item.source)) docLink(`Source: ${item.source.split("/").pop().split("#")[0]}`, item.source);
+  if (item.plan && item.section !== "plans") docLink("Plan", item.plan);
+  return row;
+}
+
 function inboxRow(item) {
   const key = itemKey(item);
   const node = el("div", "item");
@@ -684,6 +711,8 @@ function inboxRow(item) {
   if (item.why) meta.append(el("span", `item-why${item.section === "blocked" ? " is-warn" : ""}`, item.why));
   text.append(title);
   if (meta.children.length) text.append(meta);
+  const links = itemLinks(item);
+  if (links.children.length) text.append(links);
 
   const actions = el("div", "item-actions");
   INBOX_DO[item.section].forEach(([label, verb], i) => {

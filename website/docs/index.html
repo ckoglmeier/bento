@@ -120,7 +120,7 @@ kb open</code></pre></li>
     <h2 id="the-board">The board</h2>
     <p><code>kb open</code> opens the board at <code>http://127.0.0.1:4747</code>, and starts it in the background if it isn't running. You can also tell your agent "open bento". The board has five views:</p>
     <ul>
-      <li><strong>Inbox:</strong> one ranked queue of everything waiting on you: blocked cards, plans to approve, finished work to accept, Next cards missing a done-when, and Scratchpad notes. Clear it from the keyboard. <kbd>j</kbd> and <kbd>k</kbd> move, <kbd>a</kbd> approves or accepts, <kbd>r</kbd> requests changes or sends work back, and <kbd>Enter</kbd> opens the card. Use Change order to pick which sections show and in what order, or run <code>kb inbox --order blocked,review,plans</code>.</li>
+      <li><strong>Inbox:</strong> one ranked queue of everything waiting on you: blocked cards, plans to approve, finished work to accept, Next cards missing a done-when, epics assigned to you, milestones past their date, and Scratchpad notes. Each item links to what to check: the URL or doc an agent gave with <code>kb review --link</code>, the source doc, and the plan. Clear it from the keyboard. <kbd>j</kbd> and <kbd>k</kbd> move, <kbd>a</kbd> approves or accepts, <kbd>r</kbd> requests changes or sends work back, and <kbd>Enter</kbd> opens the card. Use Change order to pick which sections show and in what order, or run <code>kb inbox --order blocked,review,plans</code>.</li>
       <li><strong>Delivery:</strong> what to take up next, what each item still needs from you, and what is ready to verify.</li>
       <li><strong>Calendar:</strong> milestones across projects, and how the work feeding each one stands. Drag a milestone onto a date to move it.</li>
       <li><strong>Scratchpad:</strong> loose notes and ideas. Agents never pick these up, and any of them can become an epic. Say "note for bento" in Claude Code or Codex, and the agent saves a short summary of the discussion here.</li>
@@ -192,7 +192,7 @@ kb wake 12 13                    have this Codex session resumed when they finis
 kb set 12 needs "#9"             change a field
 kb note 12 "text" --as codex     add a dated note
 kb block 12 "reason"             flag a card as stuck (kb unblock 12 clears it)
-kb review 12 --as codex --note "text"
+kb review 12 --as codex --note "text" --link https://preview.example.com
 kb move 12 next --top            move or release a card
 kb delete 12                     move a card to TRASH.md (kb restore 12 undoes it)
 kb calendar                      milestones and their dependencies

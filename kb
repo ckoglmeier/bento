@@ -918,10 +918,11 @@ INBOX_SECTIONS = {
     "plans": "Plans to approve",
     "review": "Finished work to accept",
     "done-when": "Next cards missing a done-when",
-    "scratchpad": "Scratchpad notes to promote",
     "yours": "Epics assigned to you",
+    "milestones": "Milestones past their date",
+    "scratchpad": "Scratchpad notes to promote",
 }
-DEFAULT_INBOX = ["blocked", "plans", "review", "done-when", "scratchpad"]
+DEFAULT_INBOX = list(INBOX_SECTIONS)
 
 
 def inbox_order(config=None):
@@ -944,7 +945,11 @@ def inbox_sections_for(section, card, me):
     column = section.name.lower()
     if column == "scratchpad":
         return ["scratchpad"]
-    if column in ("done", "milestones") or card.get("kind") == "milestone":
+    if column == "done":
+        return []
+    if card.get("kind") in DATED_KINDS and (card.get("target") or "9999") < today():
+        return ["milestones"]
+    if column == "milestones" or card.get("kind") == "milestone":
         return []
     blocked = card.get("blocked") or ""
     hits = []
@@ -959,6 +964,16 @@ def inbox_sections_for(section, card, me):
     if (card.get("for") or "").lower() == me and column != "review":
         hits.append("yours")
     return hits
+
+
+def card_links(card):
+    """Where to check a card's work: its link field first, then web addresses in its notes."""
+    found = []
+    link = (card.get("link") or "").strip()
+    if link:
+        found.append(link)
+    found += [u.rstrip(".,;:") for u in re.findall(r"https?://[^\s<>)\]\"']+", "\n".join(card.lines))]
+    return list(dict.fromkeys(found))[:4]
 
 
 def inbox(board, config=None, project=None):
@@ -980,10 +995,12 @@ def inbox(board, config=None, project=None):
             "plans": card.get("plan"),
             "review": card.get("claimed") and "from %s" % card.get("claimed").split(" ")[0],
             "done-when": "No done-when yet",
+            "milestones": "Was due %s" % card.get("target"),
         }.get(kind)
         item = {
             "section": kind, "id": card.id, "ids": [card.id], "title": card.title, "column": section.name,
             "project": card.get("project"), "why": reason or "", "plan": card.get("plan"),
+            "source": card.get("source"), "links": card_links(card),
         }
         if kind == "plans":
             if item["plan"] in plans:
@@ -1382,6 +1399,8 @@ def cmd_review(args):
             raise KbError("#%d is already Done." % card.id)
         if args.note:
             card.note(args.note, who)
+        if args.link:
+            card.set("link", args.link)
         move_card(board, card, "Review")
     print("#%d is in Review." % args.id)
 
@@ -2143,6 +2162,7 @@ def build_parser():
     p = sub.add_parser("review", parents=[who], help="hand finished work to the owner")
     p.add_argument("id", type=int)
     p.add_argument("--note")
+    p.add_argument("--link", help="where to check the work: a URL or a doc in the workspace")
     p.set_defaults(func=cmd_review)
 
     p = sub.add_parser("delete", help="delete a card; it goes to TRASH.md")

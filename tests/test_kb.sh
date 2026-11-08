@@ -364,7 +364,7 @@ check "unknown inbox section refused" "$("$KB" inbox --order review,nope 2>&1)" 
 check "a card shows in the higher section" "$(section_of $IN)" "['yours']"
 "$KB" inbox --order done-when,yours >/dev/null
 check "and moves when the order changes" "$(section_of $IN)" "['done-when']"
-check "inbox order resets" "$("$KB" inbox --reset)" "blocked, plans, review, done-when, scratchpad"
+check "inbox order resets" "$("$KB" inbox --reset)" "blocked, plans, review, done-when, yours, milestones, scratchpad"
 check "board data has the inbox" "$(curl -s $U/api/board)" '"inbox_order"'
 check "answer clears a block" "$(code -H "$J" -d "{\"id\":$IB,\"text\":\"Postgres\"}" $U/api/answer)" "200"
 check "answer is noted" "$("$KB" show $IB)" "answered: Postgres"
@@ -384,6 +384,20 @@ check "inbox order api" "$(code -H "$J" -d '{"order":["scratchpad","review"]}' $
 check "inbox order api saved" "$(cat "$BENTO_HOME/bento.json")" '"scratchpad"'
 check "inbox order api refuses junk" "$(code -H "$J" -d '{"order":"blocked"}' $U/api/inbox-order)" "400"
 "$KB" inbox --reset >/dev/null
+OLD=$("$KB" add "Past launch" -p inb --kind milestone --target "$(date -v-3d +%F)" | newid)
+check "milestones past their date are in the inbox" "$(section_of $OLD)" "['milestones']"
+check "past milestone says when it was due" "$("$KB" inbox -p inb)" "Was due"
+"$KB" set $OLD target "$(date -v+30d +%F)" >/dev/null
+check "future milestones stay out" "$(section_of $OLD)" "[]"
+IL=$("$KB" add "Linked work" -p inb --to next --done-when x | newid); "$KB" claim $IL --as codex --also >/dev/null
+"$KB" note $IL "Preview at https://preview.example.com/a." --as codex >/dev/null
+check "review takes a link" "$("$KB" review $IL --as codex --link https://staging.example.com/b)" "in Review"
+check "link saved on the card" "$("$KB" show $IL)" "link: https://staging.example.com/b"
+LINKS=$("$KB" inbox -p inb --json | python3 -c "import json,sys; print([i['links'] for i in json.load(sys.stdin)['items'] if i['id']==$IL][0])")
+check "inbox item carries the link first" "$LINKS" "['https://staging.example.com/b', 'https://preview.example.com/a']"
+"$KB" add "Check the copy" -p inb --for sam --source products/inb/plans/implementation-inbox-plan.md >/dev/null
+check "inbox item carries the source doc" "$("$KB" inbox -p inb --json)" '"source": "products/inb/plans/implementation-inbox-plan.md"'
+check "rules ask agents for a link" "$("$KB" rules)" "--link <where to check it>"
 
 # Reports.
 cd "$T/beta"

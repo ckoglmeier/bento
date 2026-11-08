@@ -33,7 +33,8 @@ A testing epic can't be picked up until the epics it verifies reach Review.
 
 - **"What's next?" is a read.** Run `kb next --as <you>` and answer from it. From a connected project it looks only at that project; add `--all-projects` for everything. Don't claim anything unless {owner} asked you to do the work.
 - **Claim before you start.** Run `kb claim --as <you>`, or `kb claim 12 13 --as <you>` for a set of epics. If it refuses, don't work around it.
-- **Finish into Review, never Done.** Run `kb review <id> --as <you> --note "<what changed, where to check it>"`.
+- **Finish into Review, never Done.** Run `kb review <id> --as <you> --note "<what changed>" --link <where to check it>`. The link is a URL (a preview, a staging page, a PR) or a doc in the workspace. {owner} opens it from the Inbox, so always give one.
+- **Work for {owner}** (`for: {owner}`) needs a link too: `kb set <id> link <url or doc>`, so {owner} knows what to open.
 - **Stuck?** Run `kb block <id> "<what you need>"` and tell {owner}. Don't guess past a real decision.
 - **New work you notice** goes in Backlog with `kb add`. Don't start it, and don't put it in Next.
 - **Don't delete cards** unless {owner} asked you to.
@@ -105,7 +106,7 @@ kb add "title" --to scratchpad    save a note or idea
 kb delete 12                     move a card to TRASH.md, only if {owner} asked (kb restore 12 undoes it)
 kb note 12 "text" --as codex     add a dated note
 kb block 12 "reason"             flag a card as stuck (kb unblock 12 clears it)
-kb review 12 --as codex --note "text"
+kb review 12 --as codex --note "text" --link https://preview.example.com
 kb move 12 next --top            move or release a card ({owner}'s call for Next and Done)
 kb calendar                      milestones and their dependencies (-p my-app, --json)
 kb docs                          product docs and plans (--long, --all-projects)
@@ -127,6 +128,7 @@ Prefer the commands, since they lock the file. For a hand edit, a card looks lik
 - release: Release 1
 - source: products/my-app/docs/BACKLOG.md#release-1
 - plan: products/my-app/plans/implementation-search.md
+- link: https://preview.example.com/search
 - needs: #9
 - verifies: #7
 - target: 2026-12-01
