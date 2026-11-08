@@ -364,16 +364,16 @@ check "unknown inbox section refused" "$("$KB" inbox --order review,nope 2>&1)" 
 check "a card shows in the higher section" "$(section_of $IN)" "['yours']"
 "$KB" inbox --order done-when,yours >/dev/null
 check "and moves when the order changes" "$(section_of $IN)" "['done-when']"
-check "inbox order resets" "$("$KB" inbox --reset)" "blocked, plans, review, done-when, yours, milestones, scratchpad"
+check "inbox order resets" "$("$KB" inbox --reset)" "blocked, plans, review, changed, done-when, quiet, yours, milestones, scratchpad"
 check "board data has the inbox" "$(curl -s $U/api/board)" '"inbox_order"'
 check "answer clears a block" "$(code -H "$J" -d "{\"id\":$IB,\"text\":\"Postgres\"}" $U/api/answer)" "200"
-check "answer is noted" "$("$KB" show $IB)" "answered: Postgres"
+check "answer is noted as a decision" "$("$KB" show $IB)" "answered (D1): Postgres"
 checkn "answer unblocks" "$("$KB" show $IB)" "blocked:"
 check "answering an unblocked card refused" "$(code -H "$J" -d "{\"id\":$IB}" $U/api/answer)" "400"
 check "send back needs a comment" "$(code -H "$J" -d "{\"id\":$IR}" $U/api/send-back)" "400"
 check "send back" "$(code -H "$J" -d "{\"id\":$IR,\"comment\":\"needs a test\"}" $U/api/send-back)" "200"
 check "sent back to Doing with the note" "$("$KB" show $IR --json)" '"column": "Doing"'
-check "send back note" "$("$KB" show $IR)" "asked for changes: needs a test"
+check "send back note" "$("$KB" show $IR)" "sent back (other): needs a test"
 check "only Review can be sent back" "$(code -H "$J" -d "{\"id\":$IR,\"comment\":\"x\"}" $U/api/send-back)" "400"
 check "done-when needs text" "$(code -H "$J" -d "{\"id\":$IN,\"field\":\"done when\",\"value\":\" \"}" $U/api/set)" "400"
 check "done-when api" "$(code -H "$J" -d "{\"id\":$IN,\"field\":\"done when\",\"value\":\"it ships\"}" $U/api/set)" "200"
@@ -398,6 +398,106 @@ check "inbox item carries the link first" "$LINKS" "['https://staging.example.co
 "$KB" add "Check the copy" -p inb --for sam --source products/inb/plans/implementation-inbox-plan.md >/dev/null
 check "inbox item carries the source doc" "$("$KB" inbox -p inb --json)" '"source": "products/inb/plans/implementation-inbox-plan.md"'
 check "rules ask agents for a link" "$("$KB" rules)" "--link <where to check it>"
+
+# Decisions, changing the bar, health, briefings and shipping.
+P1=$("$KB" add "Payments" -p pm --to next --done-when "Card payments work" | newid)
+P2=$("$KB" add "Receipts" -p pm --to next --done-when "Receipts send" | newid)
+P3=$("$KB" add "Refunds" -p pm | newid)
+"$KB" claim $P1 --as claude --also >/dev/null
+check "block with options" "$("$KB" block $P1 "Which provider?" --option Stripe --option "Paddle | maybe")" "picks from: Stripe; Paddle / maybe"
+OPTS=$("$KB" inbox -p pm --json | python3 -c "import json,sys; print([i['options'] for i in json.load(sys.stdin)['items'] if i['id']==$P1])")
+check "inbox carries the options" "$OPTS" "[['Stripe', 'Paddle / maybe']]"
+check "answer by option number" "$("$KB" answer $P1 1 --implies $P2)" "recorded D2"
+check "answer clears options" "$("$KB" show $P1 | grep -c options:)" "0"
+check "decision noted on the card it implies" "$("$KB" show $P2)" "D2 applies here (from #$P1): Stripe"
+check "why lists the decision" "$("$KB" why $P2)" "D2"
+check "why keeps the question" "$("$KB" why $P1)" "Asked: Which provider?"
+check "decisions file is markdown" "$(cat "$BENTO_HOME/DECISIONS.md")" "### D2 Stripe"
+"$KB" block $P1 "Refund window?" >/dev/null
+check "card numbers in an answer count as implied" "$(code -H "$J" -d "{\"id\":$P1,\"text\":\"30 days, also for #$P3\"}" $U/api/answer)" "200"
+check "implied by mention" "$("$KB" why $P3)" "30 days"
+check "decide supersedes" "$("$KB" decide "Use Paddle" --implies $P1 --supersedes d2)" "Recorded D4"
+check "superseded decision is marked" "$("$KB" why $P2)" "Replaced by D4"
+check "cards of the old decision hear about it" "$("$KB" show $P2)" "D4 replaced D2: Use Paddle"
+check "a decision can't be replaced twice" "$("$KB" decide "x" --supersedes D2 2>&1)" "already replaced by D4"
+check "unknown decision refused" "$("$KB" decide "x" --supersedes D99 2>&1)" "No decision D99"
+check "card json carries decisions" "$("$KB" show $P2 --json)" '"superseded_by": "D4"'
+check "claimed done-when needs a reason" "$("$KB" set $P1 "done when" Cards work --as claude 2>&1)" "needs --reason"
+check "unclaimed done-when changes freely" "$("$KB" set $P2 "done when" Receipts email --as claude)" "Updated"
+"$KB" set $P1 "done when" "Cards work in test mode" --as claude --reason "live keys later" >/dev/null
+check "change is noted with its reason" "$("$KB" show $P1)" "changed the done-when: live keys later. Was: Card payments work"
+check "agent's change is in the inbox" "$("$KB" inbox -p pm)" "claude changed it. Was: Card payments work"
+check "the change is logged" "$(tail -3 "$BENTO_HOME/EVENTS.log")" '"bar changed"'
+check "recorded fields can't be set by hand" "$("$KB" set $P1 "done when changed" x 2>&1)" "kb bar"
+check "undo puts the old done-when back" "$(code -H "$J" -d "{\"id\":$P1,\"decision\":\"undo\"}" $U/api/bar)" "200"
+check "old done-when is back" "$("$KB" show $P1)" "done when: Card payments work"
+checkn "change cleared" "$("$KB" show $P1)" "done when changed"
+"$KB" set $P1 "done when" "Cards work in test mode" --as claude --reason "again" >/dev/null
+check "keep the new done-when" "$("$KB" bar $P1 keep)" "kept the new one"
+check "kept" "$("$KB" show $P1)" "done when: Cards work in test mode"
+check "nothing to settle" "$("$KB" bar $P1 keep 2>&1)" "hasn't been changed"
+check "owner change needs a reason too" "$("$KB" set $P1 "done when" "x y" --as sam 2>&1)" "needs --reason"
+"$KB" set $P1 "done when" "Cards work" --as sam --reason "simpler" >/dev/null
+checkn "owner's own change stays out of the inbox" "$("$KB" inbox -p pm)" "changed it"
+"$KB" review $P1 --as claude --link https://pay.example.test >/dev/null
+check "send back needs a known reason" "$("$KB" send-back $P1 "no" --reason vibes 2>&1)" "invalid choice"
+check "send back with a reason" "$("$KB" send-back $P1 "Receipt email missing" --reason missing)" "back to Doing"
+check "reason noted" "$("$KB" show $P1)" "sent back (something's missing): Receipt email missing"
+check "sent back is logged" "$(tail -2 "$BENTO_HOME/EVENTS.log")" '"reason": "missing"'
+check "resume shows what you hold" "$("$KB" resume --as claude -p pm)" "You hold:"
+check "resume shows what came back" "$("$KB" resume --as claude -p pm)" "sent back (something's missing)"
+check "resume shows decisions" "$("$KB" resume --as claude -p pm)" "D4"
+check "resume says what to do" "$("$KB" resume --as claude -p pm)" "Next step: Read what came back on #$P1"
+check "resume needs a name" "$("$KB" resume 2>&1)" "Say who you are"
+"$KB" note $P1 "Fixed the receipt email." --as claude >/dev/null
+check "a reply clears what came back" "$("$KB" resume --as claude -p pm)" "Next step: Carry on with #$P1"
+"$KB" set $P1 claimed "claude 2026-01-02" >/dev/null; sed -i '' "s/^- $(date +%F) /- 2026-01-02 /" "$BENTO_HOME/BOARD.md"
+check "quiet work is in the inbox" "$("$KB" inbox -p pm)" "No update from claude since 2026-01-02"
+check "health finds quiet work" "$("$KB" health -p pm)" "No update since 2026-01-02"
+"$KB" health -p pm >/dev/null; check "health exits 1 when stuck" "$?" "1"
+check "health names who takes the next step" "$("$KB" health -p pm --json)" '"who": "claude"'
+check "health api" "$(curl -s $U/api/health)" '"problem"'
+"$KB" report add "Nightly" -p pm --link https://r.example.test --schedule "Daily at 2:00" >/dev/null
+check "health finds a silent report" "$("$KB" health -p pm)" "No copy posted yet"
+printf 'ok\n' | "$KB" report post Nightly >/dev/null
+checkn "a fresh report is fine" "$("$KB" health -p pm)" "Nightly"
+M1=$("$KB" add "Beta" -p pm --kind milestone --target 2026-11-01 --needs $P1,$P2 | newid)
+check "late milestone in health" "$("$KB" health -p pm)" "Late: The date has passed."
+check "ship refuses with nowhere to go" "$("$KB" ship $M1 2>&1)" "are not finished. Say where they go"
+M2=$("$KB" add "GA" -p pm --kind milestone --target 2026-12-15 | newid)
+check "ship moves unfinished epics to the next milestone" "$("$KB" ship $M1)" "Moved #$P1, #$P2 to #$M2 GA"
+check "next milestone needs them" "$("$KB" show $M2)" "needs: #$P1, #$P2"
+check "the epic says where it went" "$("$KB" show $P2)" "moved from #$M1 to #$M2"
+check "shipped milestone is Done" "$("$KB" show $M1)" "[Done]"
+check "can't ship twice" "$("$KB" ship $M1 2>&1)" "already shipped"
+check "only milestones ship" "$("$KB" ship $P1 2>&1)" "isn't a milestone"
+M3=$("$KB" add "Later" -p pm --kind milestone --target 2027-01-01 --needs $P3 | newid)
+check "ship can keep unfinished epics" "$("$KB" ship $M3 --keep)" "Shipped without #$P3"
+"$KB" add "GA 2" -p pm --kind milestone --target 2027-02-01 >/dev/null
+check "ship api" "$(code -H "$J" -d "{\"id\":$M2}" $U/api/ship)" "200"
+"$KB" note $P3 "key is sk-abcdefghijklmnop1234 and token=hunter2" >/dev/null
+DIG=$("$KB" digest -p pm)
+check "digest has headings" "$DIG" "## In progress"
+check "digest lists decisions" "$DIG" "## Recent decisions"
+check "digest counts send-backs" "$DIG" "something's missing: 1"
+checkn "digest redacts keys" "$DIG" "sk-abcdefghijklmnop1234"
+check "digest api" "$(curl -s $U/api/digest)" "# Bento briefing"
+"$KB" digest -p pm --out "$T/brief.md" >/dev/null
+check "digest writes a file" "$(cat "$T/brief.md")" "# Bento briefing for pm"
+check "watch needs a file" "$("$KB" digest --watch 2>&1)" "needs --out"
+check "redact keeps the label" "$(python3 -c "import importlib.machinery as m; k=m.SourceFileLoader('kb','$KB').load_module(); print(k.redact('password: abc123 and ghp_abcdefghijklmnopqrstuvwxyz'))")" "password: [redacted] and [redacted]"
+python3 - "$BENTO_HOME/bento.json" <<'PY'
+import json, sys
+c = json.load(open(sys.argv[1])); c["inbox"] = ["review", "blocked"]; c.pop("inbox_seen", None); json.dump(c, open(sys.argv[1], "w"))
+PY
+check "new sections join an old saved order" "$("$KB" inbox --json | python3 -c "import json,sys; print(json.load(sys.stdin)['order'])")" "['review', 'changed', 'quiet', 'blocked']"
+"$KB" inbox --reset >/dev/null
+
+# Every command is in the docs.
+for c in $("$KB" --help | sed -n '/^commands:/,$p' | grep -oE '^    [a-z-]+' | tr -d ' '); do
+  grep -q "kb $c" "${KB:h}/website/docs/index.html" || { echo "FAIL docs miss kb $c"; fail=1; }
+done
+echo "ok   every command is in the docs"
 
 # Reports.
 cd "$T/beta"

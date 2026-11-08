@@ -295,6 +295,10 @@ class Section:
 class Board:
     def __init__(self):
         self.preamble, self.sections = [], []
+        self.events = []  # Extra events to log on save, beyond what diff_events sees.
+
+    def log(self, card, type, **extra):
+        self.events.append(dict(extra, type=type, id=card.id, title=card.title, project=card.get("project")))
 
     def column(self, name):
         name = "Scratchpad" if name.lower() == "desk" else name
@@ -424,7 +428,8 @@ def locked():
         before = snapshot(board)
         yield board
         # Log before replacing the board: watchers wake on the replace and must find the events.
-        append_events(diff_events(before, board))
+        base = {"time": int(time.time()), "actor": getattr(CTX, "actor", None), "session": (current_session() or {}).get("id")}
+        append_events(diff_events(before, board) + [dict(base, **e) for e in board.events])
         atomic_write(board_path(), board.serialize())
 
 
@@ -884,6 +889,7 @@ def card_json(board, section, card):
         "fields": card.fields(),
         "body": "\n".join(card.lines),
         "not_ready": why_not_ready(board, card),
+        "decisions": [decision_json(d) for d in decisions_for(card.id)],
     }
 
 
@@ -917,19 +923,37 @@ INBOX_SECTIONS = {
     "blocked": "Blocked until you answer",
     "plans": "Plans to approve",
     "review": "Finished work to accept",
+    "changed": "Done-whens an agent changed",
     "done-when": "Next cards missing a done-when",
+    "quiet": "Work that's gone quiet",
     "yours": "Epics assigned to you",
     "milestones": "Milestones past their date",
     "scratchpad": "Scratchpad notes to promote",
 }
 DEFAULT_INBOX = list(INBOX_SECTIONS)
+# The sections that existed before the inbox remembered which ones you had seen.
+LEGACY_INBOX = ["blocked", "plans", "review", "done-when", "yours", "milestones", "scratchpad"]
 
 
 def inbox_order(config=None):
-    order = (config if config is not None else read_config()).get("inbox")
+    """The saved order. Sections added since it was saved join in their default place."""
+    config = config if config is not None else read_config()
+    order = config.get("inbox")
     if not isinstance(order, list):
         return list(DEFAULT_INBOX)
-    return [k for k in order if k in INBOX_SECTIONS]
+    seen = config.get("inbox_seen") or LEGACY_INBOX
+    order = [k for k in order if k in INBOX_SECTIONS]
+    for i, key in enumerate(DEFAULT_INBOX):
+        if key not in seen and key not in order:
+            before = [k for k in DEFAULT_INBOX[:i] if k in order]
+            order.insert(order.index(before[-1]) + 1 if before else 0, key)
+    return order
+
+
+def save_inbox_order(config, order):
+    config["inbox"] = order
+    config["inbox_seen"] = list(INBOX_SECTIONS)
+    write_config(config)
 
 
 def parse_inbox_order(keys):
@@ -959,8 +983,12 @@ def inbox_sections_for(section, card, me):
         hits.append("plans")
     if column == "review":
         hits.append("review")
+    if card.get("done when changed"):
+        hits.append("changed")
     if column == "next" and not card.get("done when"):
         hits.append("done-when")
+    if column == "doing" and not blocked and quiet_since(card):
+        hits.append("quiet")
     if (card.get("for") or "").lower() == me and column != "review":
         hits.append("yours")
     return hits
@@ -996,11 +1024,16 @@ def inbox(board, config=None, project=None):
             "review": card.get("claimed") and "from %s" % card.get("claimed").split(" ")[0],
             "done-when": "No done-when yet",
             "milestones": "Was due %s" % card.get("target"),
+            "changed": "%s changed it. Was: %s" % (
+                (card.get("done when changed") or "").split(" ")[0], card.get("done when was") or "(none)"),
+            "quiet": "No update from %s since %s" % ((card.get("claimed") or "?").split(" ")[0], quiet_since(card)),
         }.get(kind)
         item = {
             "section": kind, "id": card.id, "ids": [card.id], "title": card.title, "column": section.name,
             "project": card.get("project"), "why": reason or "", "plan": card.get("plan"),
             "source": card.get("source"), "links": card_links(card),
+            "options": card_options(card) if kind == "blocked" else [],
+            "done_when": card.get("done when"),
         }
         if kind == "plans":
             if item["plan"] in plans:
@@ -1009,6 +1042,515 @@ def inbox(board, config=None, project=None):
             plans[item["plan"]] = item
         groups[kind].append(item)
     return [item for k in order for item in groups[k]]
+
+
+# ---- Notes, options and quiet work -------------------------------------------
+
+NOTE = re.compile(r"^- (\d{4}-\d{2}-\d{2})(?: ([^:]+?))?: (.*)$")
+
+
+def card_notes(card):
+    """Dated notes on a card, oldest first: (date, author or None, text)."""
+    return [m.groups() for m in map(NOTE.match, card.lines[card._field_count():]) if m]
+
+
+def last_update(card):
+    dates = [d for d, _, _ in card_notes(card)]
+    claimed = re.search(r"\d{4}-\d{2}-\d{2}", card.get("claimed") or "")
+    if claimed:
+        dates.append(claimed.group(0))
+    return max(dates) if dates else None
+
+
+def health_setting(key, default):
+    value = read_config().get("health", {}).get(key, default)
+    return value if isinstance(value, int) and value > 0 else default
+
+
+def days_ago(date):
+    return (datetime.date.today() - datetime.date.fromisoformat(date)).days
+
+
+def quiet_since(card):
+    """The date of the last update on a claimed card, if it has been quiet too long."""
+    last = last_update(card)
+    if last and card.get("claimed") and days_ago(last) >= health_setting("quiet_days", 2):
+        return last
+    return None
+
+
+def card_options(card):
+    return [o.strip() for o in (card.get("options") or "").split("|") if o.strip()]
+
+
+# ---- Decisions -------------------------------------------------------------
+
+DECISION = re.compile(r"^### (D\d+) (.+?)\s*$")
+_decisions_cache = {}
+
+
+def decisions_path():
+    return os.path.join(home_dir(), "DECISIONS.md")
+
+
+def read_decisions():
+    """Every recorded decision, oldest first."""
+    path = decisions_path()
+    try:
+        stamp = os.stat(path).st_mtime_ns
+    except FileNotFoundError:
+        return []
+    if _decisions_cache.get("stamp") == (path, stamp):
+        return _decisions_cache["items"]
+    items, current = [], None
+    with open(path, encoding="utf-8") as f:
+        for line in f.read().splitlines():
+            m = DECISION.match(line)
+            if m:
+                current = {"id": m.group(1), "text": m.group(2), "fields": {}}
+                items.append(current)
+                continue
+            field = FIELD.match(line)
+            if current and field:
+                current["fields"][field.group(1)] = field.group(2)
+    _decisions_cache.update(stamp=(path, stamp), items=items)
+    return items
+
+
+def write_decisions(items):
+    lines = ["# Decisions", "", "What the owner decided, oldest first. `kb why <id>` lists the ones behind an epic.", ""]
+    for d in items:
+        lines.append("### %s %s" % (d["id"], d["text"]))
+        for key in ("date", "by", "question", "card", "implies", "supersedes", "superseded by"):
+            if d["fields"].get(key):
+                lines.append("- %s: %s" % (key, d["fields"][key]))
+        lines.append("")
+    atomic_write(decisions_path(), "\n".join(lines))
+
+
+def decision_cards(d):
+    """Cards a decision touches: the one it answered, then the ones it implies."""
+    return [int(n) for n in re.findall(r"\d+", d["fields"].get("card", "") + " " + d["fields"].get("implies", ""))]
+
+
+def decisions_for(id):
+    return [d for d in reversed(read_decisions()) if id in decision_cards(d)]
+
+
+def decision_json(d):
+    f = d["fields"]
+    return {
+        "id": d["id"], "text": d["text"], "date": f.get("date"), "by": f.get("by"), "question": f.get("question"),
+        "card": int(f["card"].lstrip("#")) if f.get("card") else None, "implies": [int(n) for n in re.findall(r"\d+", f.get("implies", ""))],
+        "supersedes": f.get("supersedes"), "superseded_by": f.get("superseded by"),
+    }
+
+
+def parse_ids(text):
+    return [int(n) for n in re.findall(r"\d+", text or "")]
+
+
+def record_decision(board, text, who, card=None, question=None, implies=(), supersedes=None):
+    """Save a decision, tell every card it touches, and retire the one it replaces. Call inside locked()."""
+    text = one_line(text)
+    if not text:
+        raise KbError("A decision needs words.")
+    items = list(read_decisions())
+    implies = [n for n in dict.fromkeys(implies) if n != (card.id if card else None)]
+    targets = [board.find(n)[1] for n in implies]
+    old = None
+    if supersedes:
+        supersedes = supersedes.upper()
+        old = next((d for d in items if d["id"] == supersedes), None)
+        if not old:
+            raise KbError("No decision %s. Run: kb why" % supersedes)
+        if old["fields"].get("superseded by"):
+            raise KbError("%s was already replaced by %s." % (supersedes, old["fields"]["superseded by"]))
+    new_id = "D%d" % (max([int(d["id"][1:]) for d in items] + [0]) + 1)
+    fields = {"date": today(), "by": who}
+    if question:
+        fields["question"] = one_line(question)
+    if card:
+        fields["card"] = "#%d" % card.id
+    if implies:
+        fields["implies"] = ", ".join("#%d" % n for n in implies)
+    if old:
+        fields["supersedes"] = old["id"]
+        old["fields"]["superseded by"] = new_id
+    items.append({"id": new_id, "text": text, "fields": fields})
+    for other in targets:
+        other.note("%s applies here%s: %s" % (new_id, " (from #%d)" % card.id if card else "", text), who)
+        board.log(other, "decided", decision=new_id)
+    if old:
+        for n in decision_cards(old):
+            with contextlib.suppress(KbError):
+                touched = board.find(n)[1]
+                if touched not in targets and touched is not card:
+                    touched.note("%s replaced %s: %s" % (new_id, old["id"], text), who)
+    if card:
+        board.log(card, "decided", decision=new_id)
+    write_decisions(items)
+    return new_id
+
+
+def answer_card(board, card, text, who, implies=(), supersedes=None):
+    """Answer a blocked card. A real answer becomes a decision; #numbers in it count as cards it affects."""
+    if not card.get("blocked"):
+        raise KbError("#%d isn't blocked." % card.id)
+    text = one_line(text or "")
+    question = card.get("blocked")
+    decision = None
+    if text:
+        implies = list(implies) + [n for n in parse_ids(" ".join(re.findall(r"#\d+", text)))]
+        decision = record_decision(board, text, who, card, question, implies, supersedes)
+        card.note("answered (%s): %s" % (decision, text), who)
+    else:
+        card.note("unblocked", who)
+    card.set("blocked", None)
+    card.set("options", None)
+    return decision
+
+
+# ---- Changing the bar ------------------------------------------------------
+
+
+def ever_claimed(section, card):
+    return bool(card.get("claimed")) or section.name.lower() in ("doing", "review", "done")
+
+
+def change_done_when(board, section, card, value, who, reason=None, require_reason=True):
+    """Change a card's done-when. Once work is claimed, that takes a reason and the owner sees it."""
+    old = card.get("done when")
+    if (value or None) == (old or None):
+        return
+    if old and ever_claimed(section, card):
+        if require_reason and not (reason or "").strip():
+            raise KbError("#%d has been claimed, so changing its done-when needs --reason \"what the old one got wrong\"." % card.id)
+        card.note("changed the done-when%s. Was: %s" % (": " + one_line(reason) if reason else "", old), who)
+        if (who or "").lower() != owner().lower():
+            if not card.get("done when changed"):
+                card.set("done when was", old)
+            card.set("done when changed", "%s %s" % (who or "someone", today()))
+        board.log(card, "bar changed", reason=reason)
+    card.set("done when", value or None)
+
+
+def settle_bar(card, keep, who):
+    if not card.get("done when changed"):
+        raise KbError("#%d's done-when hasn't been changed by an agent." % card.id)
+    if keep:
+        card.note("kept the new done-when", who)
+    else:
+        card.note("put the done-when back. Undid: %s" % card.get("done when"), who)
+        card.set("done when", card.get("done when was"))
+    card.set("done when was", None)
+    card.set("done when changed", None)
+
+
+# ---- Sending work back -----------------------------------------------------
+
+SEND_BACK = {
+    "mismatch": "doesn't match the done-when",
+    "broken": "doesn't work",
+    "unclear": "can't tell if it works",
+    "missing": "something's missing",
+    "other": "other",
+}
+
+
+def send_back(board, section, card, comment, reason, who):
+    comment = one_line(comment or "")
+    reason = (reason or "other").lower()
+    if reason not in SEND_BACK:
+        raise KbError("Reason must be one of: %s." % ", ".join(SEND_BACK))
+    if not comment:
+        raise KbError("Say what should change.")
+    if section.name.lower() != "review":
+        raise KbError("#%d isn't in Review." % card.id)
+    move_card(board, card, "Doing")
+    card.note("sent back (%s): %s" % (SEND_BACK[reason], comment), who)
+    board.log(card, "sent back", reason=reason)
+
+
+# ---- Shipping milestones ---------------------------------------------------
+
+
+def following_milestone(board, card):
+    """The next dated milestone or release in the same project, by date."""
+    later = [
+        c for s, c in board.all_cards()
+        if c is not card and c.get("kind") in DATED_KINDS and s.name.lower() != "done"
+        and c.get("project") == card.get("project") and (c.get("target") or "9999") >= (card.get("target") or "")
+    ]
+    return min(later, key=lambda c: (c.get("target") or "9999", c.id)) if later else None
+
+
+def ship(board, id, who, next_id=None, keep=False):
+    """Mark a milestone reached. Epics it needed that aren't finished move to the next milestone."""
+    section, card = board.find(id)
+    if card.get("kind") not in DATED_KINDS:
+        raise KbError("#%d isn't a milestone or release." % id)
+    if section.name.lower() == "done":
+        raise KbError("#%d already shipped." % id)
+    column_of = {c.id: s.name.lower() for s, c in board.all_cards()}
+    unfinished = [n for n in card.numbers("needs") if column_of.get(n, "done") not in ("done", "review")]
+    nxt = None
+    if unfinished and not keep:
+        nxt = board.find(next_id)[1] if next_id else following_milestone(board, card)
+        if not nxt:
+            raise KbError("%s %s not finished. Say where %s: --next <milestone>, or --keep to ship without moving them." % (
+                ", ".join("#%d" % n for n in unfinished), "is" if len(unfinished) == 1 else "are",
+                "it goes" if len(unfinished) == 1 else "they go"))
+        if nxt.get("kind") not in DATED_KINDS or nxt is card:
+            raise KbError("#%d isn't another milestone or release." % nxt.id)
+        card.set("needs", ", ".join("#%d" % n for n in card.numbers("needs") if n not in unfinished) or None)
+        nxt.set("needs", ", ".join("#%d" % n for n in dict.fromkeys(nxt.numbers("needs") + unfinished)))
+        for n in unfinished:
+            board.find(n)[1].note("moved from #%d to #%d when #%d shipped" % (card.id, nxt.id, card.id), who)
+        nxt.note("took %s from #%d" % (", ".join("#%d" % n for n in unfinished), card.id), who)
+    moved = " Moved %s to #%d %s." % (", ".join("#%d" % n for n in unfinished), nxt.id, nxt.title) if nxt else ""
+    kept = " Shipped without %s." % ", ".join("#%d" % n for n in unfinished) if unfinished and keep else ""
+    card.note("shipped." + moved + kept, who)
+    move_card(board, card, "Done")
+    return "#%d %s shipped.%s%s" % (card.id, card.title, moved, kept)
+
+
+# ---- Health ----------------------------------------------------------------
+
+
+def read_events():
+    events = []
+    with contextlib.suppress(FileNotFoundError):
+        with open(events_path(), encoding="utf-8") as f:
+            for line in f:
+                with contextlib.suppress(ValueError):
+                    events.append(json.loads(line))
+    return events
+
+
+def event_date(events, id, match):
+    """The date of the latest event for this card that matches."""
+    found = [e["time"] for e in events if e.get("id") == id and match(e)]
+    return datetime.date.fromtimestamp(max(found)).isoformat() if found else None
+
+
+def report_cadence(schedule):
+    text = (schedule or "").lower()
+    if "week" in text:
+        return 7
+    if "daily" in text or "day" in text or "weekday" in text:
+        return 1
+    return None
+
+
+def health(board, project=None, events=None):
+    """Everything stuck: what, since when, the next step and who takes it."""
+    events = read_events() if events is None else events
+    me = owner()
+    review_days = health_setting("review_days", 2)
+    rows = []
+
+    def add(card, problem, since, step, who):
+        rows.append({"id": card.id if card else None, "title": card.title if card else None,
+                     "project": card.get("project") if card else None,
+                     "problem": problem, "since": since, "next": step, "who": who})
+
+    for section, card in board.all_cards():
+        column = section.name.lower()
+        if column in ("scratchpad", "done") or (project and card.get("project") != project):
+            continue
+        holder = (card.get("claimed") or "").split(" ")[0] or None
+        blocked = card.get("blocked")
+        if blocked:
+            since = event_date(events, card.id, lambda e: e.get("type") == "blocked") or last_update(card)
+            if blocked.startswith("changes requested"):
+                add(card, "Plan sent back: " + blocked, since, "Update the plan, then ask for approval again", holder or card.get("for") or "any")
+            else:
+                add(card, "Blocked: " + blocked, since, "Answer it in the Inbox (kb answer %d \"...\")" % card.id, me)
+            continue
+        if column == "doing" and quiet_since(card):
+            add(card, "No update since %s" % quiet_since(card), quiet_since(card),
+                "Post a note on what's happening, or release it (kb move %d next)" % card.id, holder or "any")
+        if column == "review":
+            since = event_date(events, card.id, lambda e: e.get("type") == "moved" and e.get("to", "").lower() == "review") or last_update(card)
+            if since and days_ago(since) >= review_days:
+                add(card, "Waiting in Review", since, "Accept it or send it back", me)
+        if card.get("done when changed"):
+            add(card, "Done-when changed by %s" % card.get("done when changed"), card.get("done when changed").split(" ")[-1],
+                "Keep the new done-when or put the old one back", me)
+        if card.get("kind") in DATED_KINDS:
+            row = tracking(board, section, card)
+            if row["status"] in ("late", "at risk"):
+                add(card, "%s: %s" % (row["status"].capitalize(), row["reason"]), card.get("target"),
+                    "Ship it (kb ship %d), move the date, or clear what's blocking it" % card.id, me)
+    for item in reports_json():
+        if project and item.get("project") != project:
+            continue
+        cadence = report_cadence(item.get("schedule"))
+        if not cadence:
+            continue
+        latest = (item.get("latest") or {}).get("date")
+        if not latest or days_ago(latest) * 2 >= cadence * 3:  # Silent for 1.5 cadences.
+            rows.append({"id": None, "title": "Report: %s" % item.get("name", item["key"]), "project": item.get("project"),
+                         "problem": "No copy posted since %s" % latest if latest else "No copy posted yet",
+                         "since": latest, "next": "Check the job that posts it (%s)" % (item.get("schedule") or "no schedule"),
+                         "who": "its report job"})
+    return rows
+
+
+# ---- Digest ----------------------------------------------------------------
+
+SECRETS = [
+    (re.compile(r"(?i)\b(api[_-]?key|token|secret|password|passwd)\b(\s*[:=]\s*)\S+"), r"\1\2[redacted]"),
+    (re.compile(r"\b(sk|pk|rk)-[A-Za-z0-9_-]{16,}"), "[redacted]"),
+    (re.compile(r"\b(ghp|gho|ghs|ghu)_[A-Za-z0-9]{20,}|\bgithub_pat_[A-Za-z0-9_]{20,}"), "[redacted]"),
+    (re.compile(r"\bxox[abprs]-[A-Za-z0-9-]{10,}"), "[redacted]"),
+    (re.compile(r"\bAKIA[0-9A-Z]{16}\b"), "[redacted]"),
+    (re.compile(r"\b[A-Za-z0-9_-]{40,}\b"), "[redacted]"),
+]
+
+
+def redact(text):
+    for pattern, replacement in SECRETS:
+        text = pattern.sub(replacement, text)
+    return text
+
+
+def digest(board, project=None):
+    """A short Markdown briefing of the board, for you or a chat assistant. Secrets are taken out."""
+    config = read_config()
+    me = config.get("owner", "me")
+    events = read_events()
+    keep = lambda c: not project or c.get("project") == project
+    tag = lambda c: " [%s]" % c.get("project") if c.get("project") and not project else ""
+    out = ["# Bento briefing%s, %s" % (" for " + project if project else "", today()), ""]
+
+    items = inbox(board, config, project)
+    out.append("## Waiting on %s (%d)" % (me, len(items)))
+    for key in inbox_order(config):
+        group = [i for i in items if i["section"] == key]
+        if group:
+            out.append("")
+            out.append("%s:" % INBOX_SECTIONS[key])
+            for i in group:
+                line = "- %s %s" % (" ".join("#%d" % n for n in i["ids"]), i["title"])
+                line += " [%s]" % i["project"] if i["project"] and not project else ""
+                if i["why"]:
+                    line += ": " + i["why"]
+                if i["options"]:
+                    line += " (options: %s)" % "; ".join(i["options"])
+                out.append(line)
+    if not items:
+        out.append("Nothing.")
+
+    def column(name, heading, limit=None):
+        cards = [c for c in board.column(name).cards if keep(c)]
+        out.extend(["", "## %s (%d)" % (heading, len(cards))])
+        for c in cards[:limit]:
+            bits = []
+            if c.get("claimed"):
+                bits.append(c.get("claimed"))
+            if c.get("blocked"):
+                bits.append("blocked")
+            out.append("- #%d %s%s%s" % (c.id, c.title, tag(c), " (%s)" % ", ".join(bits) if bits else ""))
+            if name == "Next" and c.get("done when"):
+                out.append("  Done when: %s" % c.get("done when"))
+        if limit and len(cards) > limit:
+            out.append("- and %d more" % (len(cards) - limit))
+        if not cards:
+            out.append("Nothing.")
+
+    column("Doing", "In progress")
+    column("Next", "Up next", 5)
+    rows = [r for r in tracking_rows(board, project) if r["status"] != "reached"]
+    if rows:
+        out.extend(["", "## Milestones"])
+        for r in rows:
+            out.append("- %s #%d %s%s: %s, %d of %d done%s" % (
+                r["target"] or "no date", r["id"], r["title"], " [%s]" % r["project"] if r["project"] and not project else "",
+                r["status"], r["done"], r["total"], ". " + r["reason"] if r["reason"] else ""))
+    stuck = health(board, project, events)
+    if stuck:
+        out.extend(["", "## Stuck"])
+        for r in stuck:
+            label = "#%d %s" % (r["id"], r["title"]) if r["id"] else r["title"]
+            out.append("- %s: %s. Next: %s (%s)" % (label, r["problem"], r["next"], r["who"]))
+    on_board = {c.id for _, c in board.all_cards() if keep(c)}
+    recent = [d for d in reversed(read_decisions()) if d["fields"].get("date", "") >= (datetime.date.today() - datetime.timedelta(days=14)).isoformat()
+              and (not project or set(decision_cards(d)) & on_board)]
+    if recent:
+        out.extend(["", "## Recent decisions"])
+        for d in recent[:8]:
+            cards = ", ".join("#%d" % n for n in decision_cards(d))
+            gone = " (replaced by %s)" % d["fields"]["superseded by"] if d["fields"].get("superseded by") else ""
+            out.append("- %s %s: %s%s%s" % (d["id"], d["fields"].get("date", ""), d["text"], " (%s)" % cards if cards else "", gone))
+    cutoff = time.time() - 30 * 86400
+    sent = [e for e in events if e.get("type") == "sent back" and e.get("time", 0) >= cutoff
+            and (not project or e.get("project") == project)]
+    if sent:
+        counts = {}
+        for e in sent:
+            label = SEND_BACK.get(e.get("reason"), "other")
+            counts[label] = counts.get(label, 0) + 1
+        out.extend(["", "## Sent back in the last 30 days", ", ".join("%s: %d" % kv for kv in sorted(counts.items(), key=lambda kv: -kv[1]))])
+    return redact("\n".join(out)) + "\n"
+
+
+# ---- Resume ----------------------------------------------------------------
+
+
+def resume(board, who, project=None):
+    """Where an agent stands at the start of a session, and what to do next."""
+    me = owner().lower()
+    mine = [(s, c) for s, c in board.all_cards()
+            if (not project or c.get("project") == project)
+            and ((s.name.lower() == "doing" and (c.get("claimed") or "").split(" ")[0].lower() == who)
+                 or (s.name.lower() == "next" and (c.get("for") or "").lower() == who))]
+    out = []
+    held = [c for s, c in mine if s.name.lower() == "doing"]
+    if held:
+        out.append("You hold:")
+        for c in held:
+            out.append("  #%d %s (claimed %s)%s" % (c.id, c.title, (c.get("claimed") or "").split(" ")[-1], "  BLOCKED: " + c.get("blocked") if c.get("blocked") else ""))
+            if c.get("done when"):
+                out.append("    Done when: %s" % c.get("done when"))
+            if c.get("plan"):
+                out.append("    Plan: %s" % c.get("plan"))
+    back = []
+    for s, c in mine:
+        notes = card_notes(c)
+        yours = [i for i, n in enumerate(notes) if (n[1] or "").lower() == who]
+        since = [n for n in notes[(yours[-1] + 1 if yours else 0):] if (n[1] or "").lower() == me]
+        if since:
+            back.append("  #%d %s:" % (c.id, c.title))
+            back.extend("    %s %s: %s" % (n[0], n[1], n[2]) for n in since[-3:])
+        elif (c.get("blocked") or "").startswith("changes requested"):
+            back.append("  #%d %s: %s" % (c.id, c.title, c.get("blocked")))
+    if back:
+        out.append("Came back to you:")
+        out.extend(back)
+    ids = {c.id for _, c in mine}
+    decided = [d for d in reversed(read_decisions()) if set(decision_cards(d)) & ids and not d["fields"].get("superseded by")]
+    if decided:
+        out.append("Decisions on your epics:")
+        out.extend("  %s %s: %s" % (d["id"], d["fields"].get("date", ""), d["text"]) for d in decided[:6])
+    waiting = [c for s, c in mine if s.name.lower() == "next"]
+    if waiting:
+        out.append("Handed to you in Next: %s" % ", ".join("#%d %s" % (c.id, c.title) for c in waiting))
+    working = [c for c in held if not c.get("blocked")]
+    if back:
+        step = "Read what came back on #%d and carry on." % int(re.search(r"#(\d+)", back[0]).group(1))
+    elif working:
+        step = "Carry on with #%d %s." % (working[0].id, working[0].title)
+    elif waiting:
+        step = "Claim it: kb claim %d --as %s" % (waiting[0].id, who)
+    else:
+        card = pick(board, who, project)
+        step = ("Ask %s before claiming #%d %s (kb next --as %s)." % (owner(), card.id, card.title, who)) if card else "Nothing to pick up. Tell %s." % owner()
+        if held:
+            step = "Everything you hold is blocked on %s. %s" % (owner(), step)
+    out.append("Next step: " + step)
+    return "\n".join(out)
 
 
 # ---- Command line ----------------------------------------------------------
@@ -1076,11 +1618,11 @@ def cmd_list(args):
 def cmd_inbox(args):
     config = read_config()
     if args.reset or args.order is not None:
-        config["inbox"] = list(DEFAULT_INBOX) if args.reset else parse_inbox_order(re.split(r"[,\s]+", args.order))
-        if not config["inbox"]:
+        order = list(DEFAULT_INBOX) if args.reset else parse_inbox_order(re.split(r"[,\s]+", args.order))
+        if not order:
             raise KbError("Name at least one section: %s." % ", ".join(INBOX_SECTIONS))
-        write_config(config)
-        print("Inbox order: %s" % ", ".join(config["inbox"]))
+        save_inbox_order(config, order)
+        print("Inbox order: %s" % ", ".join(order))
         return
     items = inbox(load(), config, args.project)
     if args.json:
@@ -1455,28 +1997,139 @@ def tracking_rows(board, project=None):
 
 def cmd_set(args):
     value = " ".join(args.value) or None
-    if args.field == "target" and value:
+    field = args.field.lower().replace("-", " ").replace("_", " ")
+    if field == "target" and value:
         valid_date(value)
+    if field in ("done when changed", "done when was"):
+        raise KbError("That field records an agent's change for %s. Use: kb bar %d keep|undo" % (owner(), args.id))
     with locked() as board:
-        _, card = board.find(args.id)
-        if args.field == "target" and value:
+        section, card = board.find(args.id)
+        if field == "target" and value:
             check_dated(card.get("kind"))
-        card.set(args.field, value)
+        if field == "done when":
+            change_done_when(board, section, card, value, (args.who or "").lower() or None, args.reason)
+        else:
+            card.set(args.field, value)
     print("Updated #%d." % args.id)
 
 
 def cmd_block(args):
+    options = [one_line(o).replace("|", "/") for o in args.option or [] if one_line(o)]
     with locked() as board:
         _, card = board.find(args.id)
         card.set("blocked", args.reason)
-    print("#%d is blocked." % args.id)
+        card.set("options", " | ".join(options) or None)
+    print("#%d is blocked.%s" % (args.id, " %s picks from: %s" % (owner(), "; ".join(options)) if options else ""))
 
 
 def cmd_unblock(args):
     with locked() as board:
         _, card = board.find(args.id)
         card.set("blocked", None)
+        card.set("options", None)
     print("#%d is unblocked." % args.id)
+
+
+def cmd_answer(args):
+    who = (args.who or owner()).lower()
+    with locked() as board:
+        _, card = board.find(args.id)
+        text = args.text
+        options = card_options(card)
+        if text and text.isdigit() and options and 1 <= int(text) <= len(options):
+            text = options[int(text) - 1]
+        decision = answer_card(board, card, text, who, parse_ids(args.implies), args.supersedes)
+    print("Answered #%d%s." % (args.id, " and recorded %s" % decision if decision else ""))
+
+
+def cmd_decide(args):
+    who = (args.who or owner()).lower()
+    with locked() as board:
+        decision = record_decision(board, args.text, who, None, None, parse_ids(args.implies), args.supersedes)
+    print("Recorded %s." % decision)
+
+
+def print_decision(d):
+    f = d["fields"]
+    cards = ", ".join("#%d" % n for n in decision_cards(d))
+    print("%s %s %s: %s%s" % (d["id"], f.get("date", ""), f.get("by", ""), d["text"], "  (%s)" % cards if cards else ""))
+    if f.get("question"):
+        print("    Asked: %s" % f["question"])
+    if f.get("supersedes"):
+        print("    Replaces %s" % f["supersedes"])
+    if f.get("superseded by"):
+        print("    Replaced by %s" % f["superseded by"])
+
+
+def cmd_why(args):
+    items = decisions_for(args.id) if args.id else list(reversed(read_decisions()))
+    if args.json:
+        print(json.dumps([decision_json(d) for d in items], indent=2))
+        return
+    if not items:
+        print("No decisions recorded%s yet." % (" for #%d" % args.id if args.id else ""))
+        return
+    for d in items:
+        print_decision(d)
+
+
+def cmd_bar(args):
+    with locked() as board:
+        _, card = board.find(args.id)
+        settle_bar(card, args.action == "keep", (args.who or owner()).lower())
+    print("#%d's done-when: %s." % (args.id, "kept the new one" if args.action == "keep" else "put back"))
+
+
+def cmd_send_back(args):
+    with locked() as board:
+        section, card = board.find(args.id)
+        send_back(board, section, card, args.comment, args.reason, (args.who or owner()).lower())
+    print("Sent #%d back to Doing." % args.id)
+
+
+def cmd_ship(args):
+    with locked() as board:
+        message = ship(board, args.id, (args.who or owner()).lower(), args.next, args.keep)
+    print(message)
+
+
+def cmd_health(args):
+    rows = health(load(), args.project)
+    if args.json:
+        print(json.dumps(rows, indent=2))
+    elif not rows:
+        print("Nothing is stuck.")
+    else:
+        for r in rows:
+            label = "#%d %s" % (r["id"], r["title"]) if r["id"] else r["title"]
+            print("%s%s\n    %s%s\n    Next: %s (%s)" % (
+                label, "  [%s]" % r["project"] if r["project"] else "", r["problem"].rstrip("."),
+                ", since %s" % r["since"] if r["since"] else "", r["next"], r["who"]))
+    if rows:
+        sys.exit(1)
+
+
+def cmd_digest(args):
+    def write():
+        text = digest(load(), args.project)
+        if args.out:
+            atomic_write(os.path.expanduser(args.out), text)
+        else:
+            sys.stdout.write(text)
+    write()
+    if args.watch:
+        if not args.out:
+            raise KbError("--watch needs --out <file> to rewrite.")
+        print("Rewriting %s after every change (Ctrl-C to stop)." % args.out, flush=True)
+        watch = Watch()
+        with contextlib.suppress(KeyboardInterrupt):
+            while True:
+                watch.wait(60)
+                write()
+
+
+def cmd_resume(args):
+    print(resume(load(), require_who(args), scope(args)))
 
 
 def cmd_archive(args):
@@ -1787,7 +2440,10 @@ def api_edit(data):
         section, card = board.find(int(data["id"]))
         if data.get("base_body") != "\n".join(card.lines) or data.get("base_title") != card.title:
             raise Conflict("This card changed while you were editing it. Reopen it to see the latest.")
+        old = card.get("done when")
         card.title, card.lines = title, clean_body(data.get("body", ""))
+        if old and card.get("done when") != old and ever_claimed(section, card):
+            card.note("changed the done-when. Was: %s" % old, owner())
         if data.get("column") and data["column"].lower() != section.name.lower():
             move_card(board, card, data["column"])
 
@@ -1836,7 +2492,8 @@ def api_set(data):
         if not value:
             raise KbError("Say what done looks like.")
         with locked() as board:
-            board.find(int(data["id"]))[1].set("done when", value)
+            section, card = board.find(int(data["id"]))
+            change_done_when(board, section, card, value, owner(), data.get("reason"), require_reason=False)
         return
     if field != "target":
         raise KbError("Only the target date or done-when can be set this way.")
@@ -1851,26 +2508,27 @@ def api_set(data):
 
 def api_answer(data):
     """Answer a blocked card: note the reply, if any, and clear the block."""
-    text = one_line(data.get("text") or "")
     with locked() as board:
         card = board.find(int(data["id"]))[1]
-        if not card.get("blocked"):
-            raise KbError("#%d isn't blocked." % card.id)
-        card.note(("answered: " + text) if text else "unblocked", owner())
-        card.set("blocked", None)
+        decision = answer_card(board, card, data.get("text") or "", owner().lower(), parse_ids(data.get("implies")))
+    return {"decision": decision}
 
 
 def api_send_back(data):
     """Send finished work back from Review with what should change."""
-    comment = one_line(data.get("comment") or "")
-    if not comment:
-        raise KbError("Say what should change.")
     with locked() as board:
         section, card = board.find(int(data["id"]))
-        if section.name.lower() != "review":
-            raise KbError("#%d isn't in Review." % card.id)
-        move_card(board, card, "Doing")
-        card.note("asked for changes: " + comment, owner())
+        send_back(board, section, card, data.get("comment"), data.get("reason"), owner().lower())
+
+
+def api_ship(data):
+    with locked() as board:
+        return {"message": ship(board, int(data["id"]), owner().lower())}
+
+
+def api_bar(data):
+    with locked() as board:
+        settle_bar(board.find(int(data["id"]))[1], data.get("decision") == "keep", owner().lower())
 
 
 def api_inbox_order(data):
@@ -1878,8 +2536,7 @@ def api_inbox_order(data):
     if not isinstance(order, list):
         raise KbError("The inbox order must be a list.")
     config = read_config()
-    config["inbox"] = parse_inbox_order(order)
-    write_config(config)
+    save_inbox_order(config, parse_inbox_order(order))
 
 
 def thread_links(full):
@@ -1923,6 +2580,7 @@ def make_handler(port):
         "/api/move": api_move, "/api/add": api_add, "/api/edit": api_edit,
         "/api/review": api_review, "/api/set": api_set, "/api/delete": api_delete, "/api/doc-save": api_doc_save, "/api/milestone-doc": api_milestone_doc, "/api/archive": lambda d: archive_done(),
         "/api/answer": api_answer, "/api/send-back": api_send_back, "/api/inbox-order": api_inbox_order,
+        "/api/ship": api_ship, "/api/bar": api_bar,
     }
 
     class Handler(http.server.BaseHTTPRequestHandler):
@@ -1978,6 +2636,10 @@ def make_handler(port):
                     self.send(200, json.dumps(data))
                 elif url.path == "/api/stream":
                     self.stream()
+                elif url.path == "/api/digest":
+                    self.send(200, digest(load()), "text/markdown; charset=utf-8")
+                elif url.path == "/api/health":
+                    self.send(200, json.dumps(health(load())))
                 elif url.path == "/api/reports":
                     self.send(200, json.dumps(reports_json()))
                 elif url.path == "/api/docs":
@@ -2182,12 +2844,63 @@ def build_parser():
     p.add_argument("id", type=int)
     p.add_argument("field", help="such as needs, release, plan or 'done when'")
     p.add_argument("value", nargs="*", help="leave empty to clear it")
+    p.add_argument("--reason", help="why, when changing the done-when of claimed work")
     p.set_defaults(func=cmd_set)
 
-    p = sub.add_parser("block", help="flag a card as stuck")
+    p = sub.add_parser("block", help="flag a card as stuck, optionally with choices")
     p.add_argument("id", type=int)
-    p.add_argument("reason")
+    p.add_argument("reason", help="the question or what you need")
+    p.add_argument("--option", action="append", help="a choice the owner can pick; repeat for each")
     p.set_defaults(func=cmd_block)
+
+    p = sub.add_parser("answer", parents=[who], help="answer a blocked card; the answer is recorded as a decision")
+    p.add_argument("id", type=int)
+    p.add_argument("text", nargs="?", default="", help="the answer, or an option's number")
+    p.add_argument("--implies", help="other cards this decision affects, such as 13,14")
+    p.add_argument("--supersedes", help="the decision this replaces, such as D3")
+    p.set_defaults(func=cmd_answer)
+
+    p = sub.add_parser("decide", parents=[who], help="record a decision the owner made")
+    p.add_argument("text")
+    p.add_argument("--implies", help="cards it affects, such as 13,14")
+    p.add_argument("--supersedes", help="the decision this replaces, such as D3")
+    p.set_defaults(func=cmd_decide)
+
+    p = sub.add_parser("why", help="the decisions behind a card, newest first (or all of them)")
+    p.add_argument("id", type=int, nargs="?")
+    p.add_argument("--json", action="store_true", help="output JSON")
+    p.set_defaults(func=cmd_why)
+
+    p = sub.add_parser("bar", parents=[who], help="keep or undo an agent's change to a done-when")
+    p.add_argument("id", type=int)
+    p.add_argument("action", choices=["keep", "undo"])
+    p.set_defaults(func=cmd_bar)
+
+    p = sub.add_parser("send-back", parents=[who], help="send work in Review back to Doing, with a reason")
+    p.add_argument("id", type=int)
+    p.add_argument("comment", help="what should change")
+    p.add_argument("--reason", default="other", choices=list(SEND_BACK), help="why it went back")
+    p.set_defaults(func=cmd_send_back)
+
+    p = sub.add_parser("ship", parents=[who], help="mark a milestone reached; unfinished epics move to the next one")
+    p.add_argument("id", type=int)
+    p.add_argument("--next", type=int, help="the milestone unfinished epics move to (default: the next one by date)")
+    p.add_argument("--keep", action="store_true", help="ship without moving unfinished epics")
+    p.set_defaults(func=cmd_ship)
+
+    p = sub.add_parser("health", help="everything stuck: why, since when, the next step and who takes it")
+    p.add_argument("--project", "-p", help="show one project")
+    p.add_argument("--json", action="store_true", help="output JSON")
+    p.set_defaults(func=cmd_health)
+
+    p = sub.add_parser("digest", help="a short Markdown briefing for you or a chat assistant, secrets removed")
+    p.add_argument("--project", "-p", help="one project")
+    p.add_argument("--out", help="write it to this file")
+    p.add_argument("--watch", action="store_true", help="rewrite --out after every change")
+    p.set_defaults(func=cmd_digest)
+
+    p = sub.add_parser("resume", parents=[who, where], help="start of a session: what you hold, what came back, what to do next")
+    p.set_defaults(func=cmd_resume)
 
     p = sub.add_parser("unblock", help="clear a block")
     p.add_argument("id", type=int)

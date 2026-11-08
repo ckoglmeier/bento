@@ -120,7 +120,7 @@ kb open</code></pre></li>
     <h2 id="the-board">The board</h2>
     <p><code>kb open</code> opens the board at <code>http://127.0.0.1:4747</code>, and starts it in the background if it isn't running. You can also tell your agent "open bento". The board has five views:</p>
     <ul>
-      <li><strong>Inbox:</strong> one ranked queue of everything waiting on you: blocked cards, plans to approve, finished work to accept, Next cards missing a done-when, epics assigned to you, milestones past their date, and Scratchpad notes. Each item links to what to check: the URL or doc an agent gave with <code>kb review --link</code>, the source doc, and the plan. Clear it from the keyboard. <kbd>j</kbd> and <kbd>k</kbd> move, <kbd>a</kbd> approves or accepts, <kbd>r</kbd> requests changes or sends work back, and <kbd>Enter</kbd> opens the card. Use Change order to pick which sections show and in what order, or run <code>kb inbox --order blocked,review,plans</code>.</li>
+      <li><strong>Inbox:</strong> one ranked queue of everything waiting on you: blocked cards, plans to approve, finished work to accept, done-whens an agent changed, Next cards missing a done-when, work that's gone quiet, epics assigned to you, milestones past their date, and Scratchpad notes. Each item links to what to check: the URL or doc an agent gave with <code>kb review --link</code>, the source doc, and the plan. Clear it from the keyboard. <kbd>j</kbd> and <kbd>k</kbd> move, <kbd>a</kbd> approves or accepts, <kbd>r</kbd> requests changes or sends work back, <kbd>1</kbd> to <kbd>9</kbd> pick an agent's offered option, and <kbd>Enter</kbd> opens the card. Sending work back asks why: it doesn't match the done-when, it doesn't work, you can't tell if it works, or something's missing. Copy briefing puts a summary of the board on your clipboard. Use Change order to pick which sections show and in what order, or run <code>kb inbox --order blocked,review,plans</code>.</li>
       <li><strong>Delivery:</strong> what to take up next, what each item still needs from you, and what is ready to verify.</li>
       <li><strong>Calendar:</strong> milestones across projects, and how the work feeding each one stands. Drag a milestone onto a date to move it.</li>
       <li><strong>Scratchpad:</strong> loose notes and ideas. Agents never pick these up, and any of them can become an epic. Say "note for bento" in Claude Code or Codex, and the agent saves a short summary of the discussion here.</li>
@@ -134,6 +134,19 @@ kb open</code></pre></li>
       <tr><td>Review</td><td>Finished, waiting for you to check</td><td>Whoever did the work</td></tr>
       <tr><td>Done</td><td>You accepted it</td><td>You only</td></tr>
     </table></div>
+
+    <h2 id="decisions">Decisions</h2>
+    <p>An agent that needs you blocks its epic with a question, and can offer choices:</p>
+<pre><code>kb block 12 "Which payment provider?" --option Stripe --option Paddle</code></pre>
+    <p>You pick one in the Inbox, or type your own answer. Every answer is saved as a decision in <code>DECISIONS.md</code>, numbered D1, D2 and on. Mention other epics in it, such as "Stripe, and the same for #13", and the decision is noted on them too. From the command line, <code>kb answer 12 Stripe --implies 13,14</code> does the same, and <code>kb decide "We launch in the US first" --implies 12,13</code> records one you made in a conversation. Change your mind with <code>kb decide "Paddle after all" --supersedes D3</code>, and every epic D3 touched is told. <code>kb why 12</code> lists the decisions behind an epic, and the card shows them on the board.</p>
+
+    <h2 id="the-bar">Keeping the done-when honest</h2>
+    <p>Once someone claims an epic, its done-when only changes with a reason: <code>kb set 12 "done when" "..." --reason "what the old one got wrong"</code>. The reason and the old wording go in the card's notes. When an agent makes the change, it shows in your Inbox until you keep it or put the old one back (<code>kb bar 12 keep</code> or <code>kb bar 12 undo</code>), so nobody can quietly lower the bar.</p>
+
+    <h2 id="health">Health, briefings and resuming</h2>
+    <p><code>kb health</code> lists everything stuck: blocked epics, claimed work with no update for two days, work waiting in Review for two days, changed done-whens, late or at-risk milestones, and recurring reports that missed one and a half of their scheduled runs. Each line says since when, the next step, and who takes it. It exits 1 when something is stuck, so a scheduled job can alert on it. Change the thresholds in <code>bento.json</code> with <code>{ "health": { "quiet_days": 3, "review_days": 2 } }</code>.</p>
+    <p><code>kb digest</code> prints a short Markdown briefing: what's waiting on you, what's in progress, what's up next, milestones, what's stuck, recent decisions, and why work was sent back. API keys, tokens, and passwords are taken out, so you can paste it into a chat assistant. <code>kb digest --out ~/briefing.md --watch</code> keeps a file current.</p>
+    <p>An agent starting a session runs <code>kb resume --as claude</code> to see what it holds, what came back from you, the decisions on its epics, and what to do next.</p>
 
     <h2 id="docs-and-plans">Docs and plans</h2>
     <p>Connecting a project registers it in your workspace and adds nothing to its repo. Bento recognizes the project by its git remote, so every clone and worktree is connected automatically. <code>--import-docs</code> copies Markdown from <code>docs/</code>, plus root files like <code>BACKLOG.md</code> and <code>ROADMAP.md</code>, from the default branch into <code>products/my-app/</code>.</p>
@@ -170,7 +183,7 @@ kb handoff 12 13 --to claude --plan products/my-app/plans/implementation-search.
     <h2 id="milestones">Milestones</h2>
     <p>Dates belong on milestones and releases, not on ordinary epics. A milestone is a named moment with one date, such as a launch or a publish date. Epics feed it through <code>needs</code>, and milestones in different projects can depend on each other.</p>
 <pre><code>kb add "Essay publishes" --kind milestone -p writing --target 2026-12-01 --needs 12,13</code></pre>
-    <p>Each one can have a doc with its theme, acceptance criteria, and release notes. Start one with <code>kb plan milestone "Essay publishes" --epics 14</code>. A milestone is at risk if a dependency is blocked, a dependency is dated after it, or dependencies are open with 7 days or fewer left.</p>
+    <p>Each one can have a doc with its theme, acceptance criteria, and release notes. Start one with <code>kb plan milestone "Essay publishes" --epics 14</code>. When it ships, run <code>kb ship 14</code>, or choose Ship it in the Inbox. Epics it needed that aren't finished or in Review move to the next milestone in the same project, or to the one you name with <code>--next 15</code>. Use <code>--keep</code> to ship without moving them. A milestone is at risk if a dependency is blocked, a dependency is dated after it, or dependencies are open with 7 days or fewer left.</p>
 
     <h2 id="reports">Recurring reports</h2>
 <pre><code>kb report add "App daily usage" --thread &lt;codex-thread-id&gt; -p my-app --schedule "Daily at 2:00"</code></pre>
@@ -178,7 +191,7 @@ kb handoff 12 13 --to claude --plan products/my-app/plans/implementation-search.
 
     <h2 id="commands">Commands</h2>
     <p><code>kb --help</code> lists everything. These are the ones you'll use most:</p>
-<pre><code>kb                               the board across projects (-p my-app, --kind testing, --all, --json)
+<pre><code>kb                               the board across projects (-p my-app, --kind testing, --all, --json; same as kb list)
 kb next --as codex               best card for you, changes nothing
 kb inbox                         what's waiting on you (--order blocked,review,plans to change it)
 kb show 12                       one card in full
@@ -192,7 +205,17 @@ kb wake 12 13                    have this Codex session resumed when they finis
 kb set 12 needs "#9"             change a field
 kb note 12 "text" --as codex     add a dated note
 kb block 12 "reason"             flag a card as stuck (kb unblock 12 clears it)
+kb block 12 "Which?" --option A --option B   ask with choices
+kb answer 12 "text"              answer a blocked card; it becomes a decision (--implies 13,14)
+kb decide "text" --implies 12    record a decision (--supersedes D3 replaces one)
+kb why 12                        the decisions behind a card
 kb review 12 --as codex --note "text" --link https://preview.example.com
+kb send-back 12 "text" --reason mismatch   send Review work back (broken, unclear, missing, other)
+kb bar 12 keep                   keep an agent's done-when change (or: undo)
+kb ship 14                       mark a milestone reached; unfinished epics move on
+kb health                        everything stuck, since when, and who's next
+kb digest                        a Markdown briefing, secrets removed (--out file --watch)
+kb resume --as claude            start of a session: what you hold and what came back
 kb move 12 next --top            move or release a card
 kb delete 12                     move a card to TRASH.md (kb restore 12 undoes it)
 kb calendar                      milestones and their dependencies

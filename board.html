@@ -59,7 +59,7 @@
   .inbox { max-width: 780px; }
   .inbox-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; }
   .inbox-head h2 { font-size: 17px; }
-  .inbox-head .quiet { margin-left: auto; }
+  .inbox-head .count + .quiet { margin-left: auto; }
   .keys { color: var(--muted); font-size: 12px; margin: 4px 0 14px; }
   kbd { font: 11px ui-monospace, "SF Mono", Menlo, monospace; padding: 0 4px; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; background: var(--card); }
   .inbox-group { font-size: 12px; font-weight: 600; color: var(--muted); margin: 16px 0 6px; }
@@ -80,6 +80,10 @@
   .reply { grid-column: 1 / -1; display: flex; gap: 6px; }
   .reply input { margin: 0; }
   .reply-error { grid-column: 1 / -1; color: var(--warn); font-size: 13px; }
+  .reply select { margin: 0; width: auto; flex: none; }
+  .item-bar { margin-top: 3px; font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+  .decisions { display: grid; gap: 4px; margin-top: 8px; font-size: 13px; }
+  .decisions .gone { color: var(--muted); text-decoration: line-through; }
   .reply-error:empty { display: none; }
   .order { background: var(--col); border-radius: 10px; padding: 10px 12px; margin: 6px 0 14px; }
   .order-row { display: flex; align-items: center; gap: 8px; padding: 3px 0; }
@@ -282,6 +286,7 @@
   <form id="form" method="dialog">
     <label>Title <input id="f-title" required autocomplete="off"></label>
     <div class="links" id="f-links"></div>
+    <div class="decisions" id="f-why" hidden></div>
     <div class="row">
       <label>Column <select id="f-column"></select></label>
       <label id="f-kind-field">Kind <select id="f-kind"></select></label>
@@ -588,11 +593,20 @@ const INBOX_DO = {
   blocked: [["Answer", "answer"]],
   plans: [["Approve", "approve"], ["Request changes", "changes"]],
   review: [["Accept", "accept"], ["Send back", "sendback"]],
+  changed: [["Keep it", "keepbar"], ["Put it back", "undobar"]],
   "done-when": [["Add done-when", "donewhen"]],
+  quiet: [["Open", "open"], ["Release it", "release"]],
   scratchpad: [["Make it an epic", "promote"], ["Finish", "finish"]],
   yours: [["Open", "open"]],
-  milestones: [["Mark reached", "accept"], ["Open", "open"]],
+  milestones: [["Ship it", "ship"], ["Open", "open"]],
 };
+const SEND_BACK = [
+  ["mismatch", "Doesn't match the done-when"],
+  ["broken", "Doesn't work"],
+  ["unclear", "Can't tell if it works"],
+  ["missing", "Something's missing"],
+  ["other", "Other"],
+];
 const REPLY = {
   answer: "Your answer, or leave it empty. Return sends it and clears the block.",
   changes: "What should change in the plan?",
@@ -604,6 +618,9 @@ let inboxSel = null, inboxIndex = 0, inboxReply = null, orderDraft = null;
 // One lasting reply box, so a live board update never drops what you're typing.
 const replyInput = document.createElement("input");
 replyInput.autocomplete = "off";
+const replyReason = el("select");
+replyReason.setAttribute("aria-label", "Why it's going back");
+setOptions(replyReason, SEND_BACK, "mismatch");
 const replyError = el("div", "reply-error");
 replyError.setAttribute("role", "alert");
 
@@ -623,6 +640,7 @@ function startReply(item, verb) {
   inboxSel = itemKey(item);
   inboxReply = { key: inboxSel, verb, item };
   replyInput.value = "";
+  replyReason.value = "mismatch";
   replyInput.placeholder = REPLY[verb];
   replyInput.setAttribute("aria-label", REPLY[verb]);
   replyError.textContent = "";
@@ -641,7 +659,7 @@ async function sendReply() {
   const calls = {
     answer: ["/api/answer", { id: item.id, text }],
     changes: ["/api/review", { plan: item.plan, decision: "changes", comment: text }],
-    sendback: ["/api/send-back", { id: item.id, comment: text }],
+    sendback: ["/api/send-back", { id: item.id, comment: text, reason: replyReason.value }],
     donewhen: ["/api/set", { id: item.id, field: "done when", value: text }],
   };
   try {
@@ -665,6 +683,27 @@ function inboxDo(item, verb) {
   if (verb === "accept" || verb === "finish") return act("/api/move", { id: item.id, column: "Done" });
   if (verb === "promote") return act("/api/move", { id: item.id, column: "Backlog" });
   if (verb === "open") return openItem(item);
+  if (verb === "keepbar" || verb === "undobar") return act("/api/bar", { id: item.id, decision: verb === "keepbar" ? "keep" : "undo" });
+  if (verb === "release") return act("/api/move", { id: item.id, column: "Next" });
+  if (verb === "ship") return act("/api/ship", { id: item.id });
+}
+
+function pickOption(item, option) {
+  inboxSel = itemKey(item);
+  return act("/api/answer", { id: item.id, text: option });
+}
+
+async function copyBriefing(b) {
+  try {
+    const res = await fetch("/api/digest");
+    const text = await res.text();
+    if (!res.ok) throw new Error("Couldn't build the briefing.");
+    await navigator.clipboard.writeText(text);
+    b.textContent = "Copied";
+  } catch (e) {
+    b.textContent = "Couldn't copy";
+  }
+  setTimeout(() => { b.textContent = "Copy briefing"; }, 1600);
 }
 
 // Where to check the work: web links open in a new tab, workspace docs open in the reader.
@@ -711,10 +750,19 @@ function inboxRow(item) {
   if (item.why) meta.append(el("span", `item-why${item.section === "blocked" ? " is-warn" : ""}`, item.why));
   text.append(title);
   if (meta.children.length) text.append(meta);
+  if (item.done_when && (item.section === "review" || item.section === "changed")) {
+    text.append(el("div", "item-bar", `Done when: ${item.done_when}`));
+  }
   const links = itemLinks(item);
   if (links.children.length) text.append(links);
 
   const actions = el("div", "item-actions");
+  (item.options || []).slice(0, 9).forEach((option, i) => {
+    const b = button("plain", option, (e) => { e.stopPropagation(); pickOption(item, option); });
+    b.append(el("kbd", "", String(i + 1)));
+    b.title = `Answer: ${option}`;
+    actions.append(b);
+  });
   INBOX_DO[item.section].forEach(([label, verb], i) => {
     const b = button(i === 0 ? "solid" : "plain", label, (e) => { e.stopPropagation(); inboxDo(item, verb); });
     b.append(el("kbd", "", i === 0 ? "a" : "r"));
@@ -724,6 +772,7 @@ function inboxRow(item) {
 
   if (inboxReply && inboxReply.key === key) {
     const reply = el("div", "reply");
+    if (inboxReply.verb === "sendback") reply.append(replyReason);
     reply.append(replyInput, button("solid", "Send", sendReply), button("plain", "Cancel", closeReply));
     node.append(reply, replyError);
   }
@@ -775,6 +824,9 @@ function renderInbox(main) {
   const box = el("div", "inbox");
   const head = el("div", "inbox-head");
   head.append(el("h2", "", "Inbox"), el("span", "count", items.length ? `${items.length} waiting on you` : ""));
+  const copy = button("quiet", "Copy briefing", () => copyBriefing(copy));
+  copy.title = "A Markdown summary of the board, with secrets taken out, to paste into a chat assistant";
+  head.append(copy);
   head.append(button("quiet", orderDraft ? "Close" : "Change order", () => {
     const names = Object.fromEntries(state.inbox_sections);
     orderDraft = orderDraft ? null : [
@@ -785,7 +837,7 @@ function renderInbox(main) {
   }));
   box.append(head);
   const keysHint = el("p", "keys");
-  keysHint.innerHTML = "<kbd>j</kbd> <kbd>k</kbd> move · <kbd>a</kbd> main action · <kbd>r</kbd> second action · <kbd>Enter</kbd> open · <kbd>Esc</kbd> cancel";
+  keysHint.innerHTML = "<kbd>j</kbd> <kbd>k</kbd> move · <kbd>a</kbd> main action · <kbd>r</kbd> second action · <kbd>1</kbd>–<kbd>9</kbd> pick an option · <kbd>Enter</kbd> open · <kbd>Esc</kbd> cancel";
   box.append(keysHint);
   if (orderDraft) box.append(orderEditor());
 
@@ -814,6 +866,7 @@ document.addEventListener("keydown", (e) => {
   else if (e.key === "k" || e.key === "ArrowUp") i = Math.max(i - 1, 0);
   else if (e.key === "a") { e.preventDefault(); inboxDo(item, verbs[0][1]); return; }
   else if (e.key === "r" && verbs[1]) { e.preventDefault(); inboxDo(item, verbs[1][1]); return; }
+  else if (/^[1-9]$/.test(e.key) && (item.options || [])[+e.key - 1]) { e.preventDefault(); pickOption(item, item.options[+e.key - 1]); return; }
   else if (e.key === "Enter" && !e.target.closest("button")) { e.preventDefault(); openItem(item); return; }
   else if (e.key === "Escape" && inboxReply) { closeReply(); return; }
   else return;
@@ -1101,6 +1154,14 @@ function openDialog(card, column, draft) {
   links.replaceChildren();
   if (f.plan) links.append(button("plain", f.approved ? "Plan (approved)" : "Review plan", () => { $("dialog").close(); openDoc(f.plan, true); }));
   if (f.source) links.append(button("plain", "Source doc", () => { $("dialog").close(); openDoc(f.source); }));
+  const why = $("f-why");
+  const decisions = card ? card.decisions || [] : [];
+  why.hidden = !decisions.length;
+  why.replaceChildren(...(decisions.length ? [el("strong", "", "Decisions behind this")] : []), ...decisions.map((d) => {
+    const line = el("div", d.superseded_by ? "gone" : "", `${d.id} · ${d.date || ""} · ${d.text}`);
+    if (d.superseded_by) line.title = `Replaced by ${d.superseded_by}`;
+    return line;
+  }));
   $("dialog").showModal();
   $("f-title").focus();
 }

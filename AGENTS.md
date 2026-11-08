@@ -35,7 +35,10 @@ A testing epic can't be picked up until the epics it verifies reach Review.
 - **Claim before you start.** Run `kb claim --as <you>`, or `kb claim 12 13 --as <you>` for a set of epics. If it refuses, don't work around it.
 - **Finish into Review, never Done.** Run `kb review <id> --as <you> --note "<what changed>" --link <where to check it>`. The link is a URL (a preview, a staging page, a PR) or a doc in the workspace. {owner} opens it from the Inbox, so always give one.
 - **Work for {owner}** (`for: {owner}`) needs a link too: `kb set <id> link <url or doc>`, so {owner} knows what to open.
-- **Stuck?** Run `kb block <id> "<what you need>"` and tell {owner}. Don't guess past a real decision.
+- **Start of a session:** run `kb resume --as <you>` to see what you hold, what came back from {owner}, and what to do next.
+- **Stuck?** Run `kb block <id> "<what you need>"` and tell {owner}. When there are clear choices, offer them: `kb block <id> "Which provider?" --option Stripe --option Paddle`. Don't guess past a real decision.
+- **Decisions are {owner}'s.** Answers are recorded in `DECISIONS.md`; `kb why <id>` lists the ones behind an epic. Follow them. If {owner} decides something in conversation, record it: `kb decide "<what>" --implies 12,13 --as <you>`.
+- **Don't move the bar quietly.** Once an epic is claimed, changing its done-when needs `--reason "<what the old one got wrong>"`, and {owner} sees the change in the Inbox.
 - **New work you notice** goes in Backlog with `kb add`. Don't start it, and don't put it in Next.
 - **Don't delete cards** unless {owner} asked you to.
 - **Disagree with the order?** Say so to {owner}. Don't reorder Next yourself.
@@ -105,7 +108,12 @@ kb set 12 needs "#9"             change a field (leave the value empty to clear 
 kb add "title" --to scratchpad    save a note or idea
 kb delete 12                     move a card to TRASH.md, only if {owner} asked (kb restore 12 undoes it)
 kb note 12 "text" --as codex     add a dated note
-kb block 12 "reason"             flag a card as stuck (kb unblock 12 clears it)
+kb block 12 "reason"             flag a card as stuck (kb unblock 12 clears it; --option A --option B offers choices)
+kb resume --as codex             what you hold, what came back, what to do next
+kb why 12                        the decisions behind a card
+kb decide "text" --implies 12    record a decision {owner} made
+kb health                        everything stuck, since when, and who's next
+kb digest                        a short Markdown briefing of the board
 kb review 12 --as codex --note "text" --link https://preview.example.com
 kb move 12 next --top            move or release a card ({owner}'s call for Next and Done)
 kb calendar                      milestones and their dependencies (-p my-app, --json)
