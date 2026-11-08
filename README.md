@@ -2,7 +2,7 @@
 
 A tidy little box for what's next.
 
-![The Bento board showing epics to take up next and work ready to verify](website/board.png)
+![The Bento Inbox: blocked work, plans to approve, and finished work to accept, in one queue](website/board.png)
 
 ## Why this exists
 
