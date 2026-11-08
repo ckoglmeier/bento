@@ -905,7 +905,93 @@ def board_json(board):
         "owner": config.get("owner", "me"),
         "projects": sorted(used | set(config.get("projects", {}))),
         "kinds": KINDS,
+        "inbox": inbox(board, config),
+        "inbox_order": inbox_order(config),
+        "inbox_sections": [[k, v] for k, v in INBOX_SECTIONS.items()],
     }
+
+
+# ---- Inbox ------------------------------------------------------------------
+
+INBOX_SECTIONS = {
+    "blocked": "Blocked until you answer",
+    "plans": "Plans to approve",
+    "review": "Finished work to accept",
+    "done-when": "Next cards missing a done-when",
+    "scratchpad": "Scratchpad notes to promote",
+    "yours": "Epics assigned to you",
+}
+DEFAULT_INBOX = ["blocked", "plans", "review", "done-when", "scratchpad"]
+
+
+def inbox_order(config=None):
+    order = (config if config is not None else read_config()).get("inbox")
+    if not isinstance(order, list):
+        return list(DEFAULT_INBOX)
+    return [k for k in order if k in INBOX_SECTIONS]
+
+
+def parse_inbox_order(keys):
+    keys = [k.strip().lower() for k in keys if k and k.strip()]
+    unknown = [k for k in keys if k not in INBOX_SECTIONS]
+    if unknown:
+        raise KbError("Unknown inbox section: %s. Choose from %s." % (", ".join(unknown), ", ".join(INBOX_SECTIONS)))
+    return list(dict.fromkeys(keys))
+
+
+def inbox_sections_for(section, card, me):
+    """Every inbox section this card could sit in. The configured order decides which one wins."""
+    column = section.name.lower()
+    if column == "scratchpad":
+        return ["scratchpad"]
+    if column in ("done", "milestones") or card.get("kind") == "milestone":
+        return []
+    blocked = card.get("blocked") or ""
+    hits = []
+    if blocked and not blocked.startswith("changes requested"):
+        hits.append("blocked")
+    if card.get("plan") and not card.get("approved") and not blocked and column != "review":
+        hits.append("plans")
+    if column == "review":
+        hits.append("review")
+    if column == "next" and not card.get("done when"):
+        hits.append("done-when")
+    if (card.get("for") or "").lower() == me and column != "review":
+        hits.append("yours")
+    return hits
+
+
+def inbox(board, config=None, project=None):
+    """What's waiting on the owner, one entry per card (or per plan), in the configured order."""
+    config = config if config is not None else read_config()
+    order = inbox_order(config)
+    me = config.get("owner", "me").lower()
+    groups = {k: [] for k in order}
+    plans = {}
+    for section, card in board.all_cards():
+        if project and card.get("project") != project and not (section.name.lower() == "scratchpad" and not card.get("project")):
+            continue
+        hits = [k for k in order if k in inbox_sections_for(section, card, me)]
+        if not hits:
+            continue
+        kind = hits[0]
+        reason = {
+            "blocked": card.get("blocked"),
+            "plans": card.get("plan"),
+            "review": card.get("claimed") and "from %s" % card.get("claimed").split(" ")[0],
+            "done-when": "No done-when yet",
+        }.get(kind)
+        item = {
+            "section": kind, "id": card.id, "ids": [card.id], "title": card.title, "column": section.name,
+            "project": card.get("project"), "why": reason or "", "plan": card.get("plan"),
+        }
+        if kind == "plans":
+            if item["plan"] in plans:
+                plans[item["plan"]]["ids"].append(card.id)
+                continue
+            plans[item["plan"]] = item
+        groups[kind].append(item)
+    return [item for k in order for item in groups[k]]
 
 
 # ---- Command line ----------------------------------------------------------
@@ -967,6 +1053,40 @@ def cmd_list(args):
             print("  " + summary(card))
         if len(shown) < len(cards):
             print("  ... %d more (--all)" % (len(cards) - len(shown)))
+        print()
+
+
+def cmd_inbox(args):
+    config = read_config()
+    if args.reset or args.order is not None:
+        config["inbox"] = list(DEFAULT_INBOX) if args.reset else parse_inbox_order(re.split(r"[,\s]+", args.order))
+        if not config["inbox"]:
+            raise KbError("Name at least one section: %s." % ", ".join(INBOX_SECTIONS))
+        write_config(config)
+        print("Inbox order: %s" % ", ".join(config["inbox"]))
+        return
+    items = inbox(load(), config, args.project)
+    if args.json:
+        print(json.dumps({"order": inbox_order(config), "items": items}, indent=2))
+        return
+    who = config.get("owner", "me")
+    if not items:
+        print("Nothing is waiting on %s." % who)
+        return
+    print("%d waiting on %s\n" % (len(items), who))
+    for key in inbox_order(config):
+        group = [i for i in items if i["section"] == key]
+        if not group:
+            continue
+        print("%s (%d)" % (INBOX_SECTIONS[key], len(group)))
+        for item in group:
+            ids = ", ".join("#%d" % n for n in item["ids"])
+            line = "  %s %s" % (ids, item["title"])
+            if item["project"]:
+                line += "  [%s]" % item["project"]
+            if item["why"]:
+                line += "  %s" % item["why"]
+            print(line)
         print()
 
 
@@ -1691,9 +1811,16 @@ def api_delete(data):
 
 
 def api_set(data):
-    if data.get("field") != "target":
-        raise KbError("Only the target date can be set this way.")
-    value = (data.get("value") or "").strip()
+    field = data.get("field")
+    value = one_line(data.get("value") or "")
+    if field == "done when":
+        if not value:
+            raise KbError("Say what done looks like.")
+        with locked() as board:
+            board.find(int(data["id"]))[1].set("done when", value)
+        return
+    if field != "target":
+        raise KbError("Only the target date or done-when can be set this way.")
     if value:
         valid_date(value)
     with locked() as board:
@@ -1701,6 +1828,39 @@ def api_set(data):
         if value:
             check_dated(card.get("kind"))
         card.set("target", value or None)
+
+
+def api_answer(data):
+    """Answer a blocked card: note the reply, if any, and clear the block."""
+    text = one_line(data.get("text") or "")
+    with locked() as board:
+        card = board.find(int(data["id"]))[1]
+        if not card.get("blocked"):
+            raise KbError("#%d isn't blocked." % card.id)
+        card.note(("answered: " + text) if text else "unblocked", owner())
+        card.set("blocked", None)
+
+
+def api_send_back(data):
+    """Send finished work back from Review with what should change."""
+    comment = one_line(data.get("comment") or "")
+    if not comment:
+        raise KbError("Say what should change.")
+    with locked() as board:
+        section, card = board.find(int(data["id"]))
+        if section.name.lower() != "review":
+            raise KbError("#%d isn't in Review." % card.id)
+        move_card(board, card, "Doing")
+        card.note("asked for changes: " + comment, owner())
+
+
+def api_inbox_order(data):
+    order = data.get("order")
+    if not isinstance(order, list):
+        raise KbError("The inbox order must be a list.")
+    config = read_config()
+    config["inbox"] = parse_inbox_order(order)
+    write_config(config)
 
 
 def thread_links(full):
@@ -1743,6 +1903,7 @@ def make_handler(port):
     actions = {
         "/api/move": api_move, "/api/add": api_add, "/api/edit": api_edit,
         "/api/review": api_review, "/api/set": api_set, "/api/delete": api_delete, "/api/doc-save": api_doc_save, "/api/milestone-doc": api_milestone_doc, "/api/archive": lambda d: archive_done(),
+        "/api/answer": api_answer, "/api/send-back": api_send_back, "/api/inbox-order": api_inbox_order,
     }
 
     class Handler(http.server.BaseHTTPRequestHandler):
@@ -1908,6 +2069,13 @@ def build_parser():
     p = sub.add_parser("next", parents=[who, where], help="best card for you; changes nothing")
     p.add_argument("--json", action="store_true", help="output JSON")
     p.set_defaults(func=cmd_next)
+
+    p = sub.add_parser("inbox", help="what's waiting on the owner, in your chosen order")
+    p.add_argument("--project", "-p", help="show one project")
+    p.add_argument("--order", help="set the sections and their order, such as blocked,review,plans")
+    p.add_argument("--reset", action="store_true", help="go back to the default order")
+    p.add_argument("--json", action="store_true", help="output JSON")
+    p.set_defaults(func=cmd_inbox)
 
     p = sub.add_parser("show", help="one card in full")
     p.add_argument("id", type=int)

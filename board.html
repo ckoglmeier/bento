@@ -56,6 +56,35 @@
   .card .to-do { font-weight: 600; }
   .card .to-do.is-action { color: var(--warn); }
   .card .to-do.is-ready { color: var(--accent); }
+  .inbox { max-width: 780px; }
+  .inbox-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; }
+  .inbox-head h2 { font-size: 17px; }
+  .inbox-head .quiet { margin-left: auto; }
+  .keys { color: var(--muted); font-size: 12px; margin: 4px 0 14px; }
+  kbd { font: 11px ui-monospace, "SF Mono", Menlo, monospace; padding: 0 4px; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; background: var(--card); }
+  .inbox-group { font-size: 12px; font-weight: 600; color: var(--muted); margin: 16px 0 6px; }
+  .inbox-group:first-of-type { margin-top: 0; }
+  .item { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 6px 12px; background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; margin-bottom: 6px; }
+  .item.selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+  .item-title { display: block; width: 100%; background: none; border: 0; padding: 0; text-align: left; overflow-wrap: anywhere; }
+  .item-title:hover { text-decoration: underline; }
+  .item .meta { margin-top: 2px; }
+  .item-why { overflow-wrap: anywhere; }
+  .item-why.is-warn { color: var(--warn); }
+  .item-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
+  .item-actions .plain, .item-actions .solid { padding: 4px 10px; font-size: 13px; }
+  .item-actions kbd { margin-left: 5px; }
+  .item-actions .solid kbd { background: none; border-color: currentColor; }
+  .reply { grid-column: 1 / -1; display: flex; gap: 6px; }
+  .reply input { margin: 0; }
+  .reply-error { grid-column: 1 / -1; color: var(--warn); font-size: 13px; }
+  .reply-error:empty { display: none; }
+  .order { background: var(--col); border-radius: 10px; padding: 10px 12px; margin: 6px 0 14px; }
+  .order-row { display: flex; align-items: center; gap: 8px; padding: 3px 0; }
+  .order-row label { display: flex; align-items: center; gap: 8px; flex: 1; margin: 0; font-size: 14px; font-weight: 400; color: var(--ink); }
+  .order-row input { width: auto; margin: 0; }
+  .order-row.off label { color: var(--muted); }
+  .order .actions { margin-top: 8px; }
   .notes { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px; align-items: start; }
   .notes .card { min-height: 92px; cursor: pointer; }
   .note-body { display: flex; flex-direction: column; flex: 1; min-width: 0; gap: 6px; }
@@ -207,6 +236,11 @@
   @media (max-width: 767px) {
     main.columns { grid-auto-flow: row; grid-auto-columns: auto; grid-template-columns: minmax(0, 1fr); overflow-x: visible; }
     .lanes { grid-template-columns: minmax(0, 1fr); }
+    #views { max-width: 100%; overflow-x: auto; }
+    #views button { flex: none; }
+    .item { grid-template-columns: minmax(0, 1fr); }
+    .item-actions { justify-content: flex-start; }
+    .item-actions .plain, .item-actions .solid { min-height: 44px; }
     .cal-day { min-height: 54px; padding: 2px; }
     .cal-dow { padding: 3px 2px; text-align: center; }
     .list { overflow: visible; }
@@ -302,8 +336,8 @@ const EMPTY = {
   Done: "Nothing finished yet.",
 };
 let state = null, version = null, dragId = null, editing = null, docsCache = null, currentDoc = null, currentText = null;
-const filters = { project: "", kind: "", mine: false, view: "delivery" };
-const VIEWS = [["delivery", "Delivery"], ["calendar", "Calendar"], ["scratchpad", "Scratchpad"], ["board", "Board"]];
+const filters = { project: "", kind: "", mine: false, view: "inbox" };
+const VIEWS = [["inbox", "Inbox"], ["delivery", "Delivery"], ["calendar", "Calendar"], ["scratchpad", "Scratchpad"], ["board", "Board"]];
 let calMonth = null;
 
 // One lasting element, so a live board update never drops what you're typing.
@@ -317,6 +351,10 @@ function remember() {
   try { localStorage.setItem("bento-filters", JSON.stringify(filters)); } catch (e) { /* optional */ }
 }
 try { Object.assign(filters, JSON.parse(localStorage.getItem("bento-filters") || "{}")); } catch (e) { /* optional */ }
+// Open on the Inbox once after it ships, then remember whatever view you pick.
+try {
+  if (!localStorage.getItem("bento-inbox")) { filters.view = "inbox"; localStorage.setItem("bento-inbox", "1"); remember(); }
+} catch (e) { /* optional */ }
 
 function el(tag, className, text) {
   const node = document.createElement(tag);
@@ -522,8 +560,8 @@ function render() {
   const main = $("board");
   renderViewTabs();
   const view = filters.view;
-  $("filter-kind").hidden = view === "calendar" || view === "scratchpad";
-  $("filter-mine").hidden = view === "calendar" || view === "scratchpad";
+  $("filter-kind").hidden = view === "calendar" || view === "scratchpad" || view === "inbox";
+  $("filter-mine").hidden = view === "calendar" || view === "scratchpad" || view === "inbox";
   main.className = view === "board" ? "columns" : "page";
   const top = main.scrollTop;
   const scroll = [...main.querySelectorAll(".list")].map((n) => n.scrollTop);
@@ -532,6 +570,7 @@ function render() {
     main.querySelectorAll(".list").forEach((n, i) => { n.scrollTop = scroll[i] || 0; });
   } else if (view === "calendar") renderCalendar(main);
   else if (view === "scratchpad") renderScratchpad(main);
+  else if (view === "inbox") renderInbox(main);
   else renderDelivery(main);
   main.scrollTop = top;
 }
@@ -540,6 +579,222 @@ function columnCards(name) {
   const column = state.columns.find((c) => c.name === name);
   return column ? column.cards.filter((c) => matches(c, name)) : [];
 }
+
+// ---- Inbox view ----
+
+const INBOX_DO = {
+  blocked: [["Answer", "answer"]],
+  plans: [["Approve", "approve"], ["Request changes", "changes"]],
+  review: [["Accept", "accept"], ["Send back", "sendback"]],
+  "done-when": [["Add done-when", "donewhen"]],
+  scratchpad: [["Make it an epic", "promote"], ["Finish", "finish"]],
+  yours: [["Open", "open"]],
+};
+const REPLY = {
+  answer: "Your answer, or leave it empty. Return sends it and clears the block.",
+  changes: "What should change in the plan?",
+  sendback: "What should change? It goes back to Doing with your note.",
+  donewhen: "Done when...",
+};
+let inboxSel = null, inboxIndex = 0, inboxReply = null, orderDraft = null;
+
+// One lasting reply box, so a live board update never drops what you're typing.
+const replyInput = document.createElement("input");
+replyInput.autocomplete = "off";
+const replyError = el("div", "reply-error");
+replyError.setAttribute("role", "alert");
+
+const itemKey = (item) => `${item.section}:${item.id}`;
+
+function inboxItems() {
+  return (state.inbox || []).filter((item) => !filters.project || item.project === filters.project
+    || (item.column === "Scratchpad" && !item.project));
+}
+
+function openItem(item) {
+  if (item.section === "plans") openDoc(item.plan, true);
+  else { const card = cardById(item.id); if (card) openDialog(card); }
+}
+
+function startReply(item, verb) {
+  inboxSel = itemKey(item);
+  inboxReply = { key: inboxSel, verb, item };
+  replyInput.value = "";
+  replyInput.placeholder = REPLY[verb];
+  replyInput.setAttribute("aria-label", REPLY[verb]);
+  replyError.textContent = "";
+  render();
+  replyInput.focus();
+}
+
+function closeReply() {
+  inboxReply = null;
+  render();
+}
+
+async function sendReply() {
+  const { verb, item } = inboxReply;
+  const text = replyInput.value.trim();
+  const calls = {
+    answer: ["/api/answer", { id: item.id, text }],
+    changes: ["/api/review", { plan: item.plan, decision: "changes", comment: text }],
+    sendback: ["/api/send-back", { id: item.id, comment: text }],
+    donewhen: ["/api/set", { id: item.id, field: "done when", value: text }],
+  };
+  try {
+    await post(...calls[verb]);
+    inboxReply = null;
+    await refresh(true);
+  } catch (e) {
+    replyError.textContent = e.message;
+  }
+}
+
+replyInput.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") { e.preventDefault(); sendReply(); }
+  else if (e.key === "Escape") { e.preventDefault(); closeReply(); }
+});
+
+function inboxDo(item, verb) {
+  inboxSel = itemKey(item);
+  if (REPLY[verb]) return startReply(item, verb);
+  if (verb === "approve") return act("/api/review", { plan: item.plan, decision: "approve", comment: "" });
+  if (verb === "accept" || verb === "finish") return act("/api/move", { id: item.id, column: "Done" });
+  if (verb === "promote") return act("/api/move", { id: item.id, column: "Backlog" });
+  if (verb === "open") return openItem(item);
+}
+
+function inboxRow(item) {
+  const key = itemKey(item);
+  const node = el("div", "item");
+  if (key === inboxSel) node.classList.add("selected");
+  node.dataset.key = key;
+  node.addEventListener("click", () => {
+    if (inboxSel === key) return;
+    inboxSel = key;
+    document.querySelectorAll(".item.selected").forEach((n) => n.classList.remove("selected"));
+    node.classList.add("selected");
+  });
+
+  const text = el("div");
+  const title = button("item-title", "", () => openItem(item));
+  title.append(el("span", "id", item.ids.map((n) => `#${n}`).join(" ") + " "), document.createTextNode(item.title));
+  const meta = el("span", "meta");
+  if (item.project) meta.append(el("span", "project", item.project));
+  if (item.why) meta.append(el("span", `item-why${item.section === "blocked" ? " is-warn" : ""}`, item.why));
+  text.append(title);
+  if (meta.children.length) text.append(meta);
+
+  const actions = el("div", "item-actions");
+  INBOX_DO[item.section].forEach(([label, verb], i) => {
+    const b = button(i === 0 ? "solid" : "plain", label, (e) => { e.stopPropagation(); inboxDo(item, verb); });
+    b.append(el("kbd", "", i === 0 ? "a" : "r"));
+    actions.append(b);
+  });
+  node.append(text, actions);
+
+  if (inboxReply && inboxReply.key === key) {
+    const reply = el("div", "reply");
+    reply.append(replyInput, button("solid", "Send", sendReply), button("plain", "Cancel", closeReply));
+    node.append(reply, replyError);
+  }
+  return node;
+}
+
+function orderEditor() {
+  const box = el("div", "order");
+  box.append(el("p", "lane-hint", "Pick what shows up and in what order. A card that fits two sections shows in the higher one."));
+  orderDraft.forEach((row, i) => {
+    const line = el("div", `order-row${row.on ? "" : " off"}`);
+    const label = el("label");
+    const check = el("input");
+    check.type = "checkbox";
+    check.checked = row.on;
+    check.addEventListener("change", () => { row.on = check.checked; render(); });
+    label.append(check, document.createTextNode(row.label));
+    const move = (by) => { orderDraft.splice(i + by, 0, ...orderDraft.splice(i, 1)); render(); };
+    const up = button("quiet", "↑", () => move(-1));
+    up.disabled = i === 0;
+    up.setAttribute("aria-label", `Move ${row.label} up`);
+    const down = button("quiet", "↓", () => move(1));
+    down.disabled = i === orderDraft.length - 1;
+    down.setAttribute("aria-label", `Move ${row.label} down`);
+    line.append(label, up, down);
+    box.append(line);
+  });
+  const actions = el("div", "actions");
+  actions.append(
+    button("plain", "Cancel", () => { orderDraft = null; render(); }),
+    button("solid", "Save order", async () => {
+      const order = orderDraft.filter((r) => r.on).map((r) => r.key);
+      orderDraft = null;
+      await act("/api/inbox-order", { order });
+    }),
+  );
+  box.append(actions);
+  return box;
+}
+
+function renderInbox(main) {
+  const items = inboxItems();
+  const keys = items.map(itemKey);
+  if (!keys.includes(inboxSel)) inboxSel = keys.length ? keys[Math.min(inboxIndex, keys.length - 1)] : null;
+  inboxIndex = Math.max(0, keys.indexOf(inboxSel));
+  if (inboxReply && !keys.includes(inboxReply.key)) inboxReply = null;
+  const typing = document.activeElement === replyInput;
+
+  const box = el("div", "inbox");
+  const head = el("div", "inbox-head");
+  head.append(el("h2", "", "Inbox"), el("span", "count", items.length ? `${items.length} waiting on you` : ""));
+  head.append(button("quiet", orderDraft ? "Close" : "Change order", () => {
+    const names = Object.fromEntries(state.inbox_sections);
+    orderDraft = orderDraft ? null : [
+      ...state.inbox_order.map((key) => ({ key, label: names[key], on: true })),
+      ...state.inbox_sections.filter(([key]) => !state.inbox_order.includes(key)).map(([key, label]) => ({ key, label, on: false })),
+    ];
+    render();
+  }));
+  box.append(head);
+  const keysHint = el("p", "keys");
+  keysHint.innerHTML = "<kbd>j</kbd> <kbd>k</kbd> move · <kbd>a</kbd> main action · <kbd>r</kbd> second action · <kbd>Enter</kbd> open · <kbd>Esc</kbd> cancel";
+  box.append(keysHint);
+  if (orderDraft) box.append(orderEditor());
+
+  if (!items.length) {
+    box.append(el("p", "empty", state.inbox_order.length ? "Inbox zero. Nothing is waiting on you." : "Every section is turned off. Use Change order to pick some."));
+  }
+  const names = Object.fromEntries(state.inbox_sections);
+  state.inbox_order.forEach((section) => {
+    const group = items.filter((i) => i.section === section);
+    if (!group.length) return;
+    box.append(el("h3", "inbox-group", `${names[section]} · ${group.length}`), ...group.map(inboxRow));
+  });
+  main.replaceChildren(box);
+  if (typing && inboxReply) replyInput.focus();
+}
+
+document.addEventListener("keydown", (e) => {
+  if (filters.view !== "inbox" || !state || e.metaKey || e.ctrlKey || e.altKey) return;
+  if (document.querySelector("dialog[open]") || e.target.closest("input, textarea, select")) return;
+  const items = inboxItems();
+  if (!items.length) return;
+  let i = Math.max(0, items.findIndex((x) => itemKey(x) === inboxSel));
+  const item = items[i];
+  const verbs = INBOX_DO[item.section];
+  if (e.key === "j" || e.key === "ArrowDown") i = Math.min(i + 1, items.length - 1);
+  else if (e.key === "k" || e.key === "ArrowUp") i = Math.max(i - 1, 0);
+  else if (e.key === "a") { e.preventDefault(); inboxDo(item, verbs[0][1]); return; }
+  else if (e.key === "r" && verbs[1]) { e.preventDefault(); inboxDo(item, verbs[1][1]); return; }
+  else if (e.key === "Enter" && !e.target.closest("button")) { e.preventDefault(); openItem(item); return; }
+  else if (e.key === "Escape" && inboxReply) { closeReply(); return; }
+  else return;
+  e.preventDefault();
+  inboxSel = itemKey(items[i]);
+  inboxIndex = i;
+  render();
+  const node = document.querySelector(".item.selected");
+  if (node) node.scrollIntoView({ block: "nearest" });
+});
 
 // ---- Delivery view ----
 

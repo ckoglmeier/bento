@@ -118,8 +118,9 @@ kb open</code></pre></li>
     <p>Agents get these rules from <code>kb rules</code>, which prints <a href="https://github.com/ckoglmeier/bento/blob/main/AGENTS.md">AGENTS.md</a>. Claiming is atomic, so two agents can't take the same card.</p>
 
     <h2 id="the-board">The board</h2>
-    <p><code>kb open</code> opens the board at <code>http://127.0.0.1:4747</code>, and starts it in the background if it isn't running. You can also tell your agent "open bento". The board has four views:</p>
+    <p><code>kb open</code> opens the board at <code>http://127.0.0.1:4747</code>, and starts it in the background if it isn't running. You can also tell your agent "open bento". The board has five views:</p>
     <ul>
+      <li><strong>Inbox:</strong> one ranked queue of everything waiting on you: blocked cards, plans to approve, finished work to accept, Next cards missing a done-when, and Scratchpad notes. Clear it from the keyboard. <kbd>j</kbd> and <kbd>k</kbd> move, <kbd>a</kbd> approves or accepts, <kbd>r</kbd> requests changes or sends work back, and <kbd>Enter</kbd> opens the card. Use Change order to pick which sections show and in what order, or run <code>kb inbox --order blocked,review,plans</code>.</li>
       <li><strong>Delivery:</strong> what to take up next, what each item still needs from you, and what is ready to verify.</li>
       <li><strong>Calendar:</strong> milestones across projects, and how the work feeding each one stands. Drag a milestone onto a date to move it.</li>
       <li><strong>Scratchpad:</strong> loose notes and ideas. Agents never pick these up, and any of them can become an epic. Say "note for bento" in Claude Code or Codex, and the agent saves a short summary of the discussion here.</li>
@@ -179,6 +180,7 @@ kb handoff 12 13 --to claude --plan products/my-app/plans/implementation-search.
     <p><code>kb --help</code> lists everything. These are the ones you'll use most:</p>
 <pre><code>kb                               the board across projects (-p my-app, --kind testing, --all, --json)
 kb next --as codex               best card for you, changes nothing
+kb inbox                         what's waiting on you (--order blocked,review,plans to change it)
 kb show 12                       one card in full
 kb claim --as codex              take the best card (or: kb claim 12 13 --as codex)
 kb add "title" --done-when "..."  add an epic to Backlog

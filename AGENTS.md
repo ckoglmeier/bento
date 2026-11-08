@@ -92,6 +92,7 @@ Only set a date {owner} gave you; don't invent one. `kb calendar` lists every mi
 ```
 kb                               the board across projects (-p my-app, --kind testing, --all, --json)
 kb next --as codex               best card for you, changes nothing
+kb inbox                         what's waiting on {owner} (--order blocked,review,plans to change it)
 kb show 12                       one card in full
 kb claim --as codex              take the best card (or: kb claim 12 13 --as codex)
 kb add "title" --kind testing --verifies 12,13 --done-when "..."

@@ -25,6 +25,7 @@ Bento is a kanban board and product-doc home that you and your coding agents can
 - **Implementation, testing, release, and writing plans**, pulled from your backlogs and roadmaps.
 - **Agent handoffs.** Iterate with one agent, then hand epics and a plan to another.
 - **Safe claiming**, so two agents can't take the same card.
+- **Inbox:** one ranked queue of everything waiting on you, cleared from the keyboard. You pick the sections and their order.
 - **Delivery view:** what to take up next, what each item still needs from you, and what is ready to verify.
 - **Calendar view:** milestones across projects, and how the work feeding each one stands.
 - **Edit docs your way:** write on the board itself, or start a Codex or Claude Code thread on any doc.

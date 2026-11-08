@@ -343,6 +343,48 @@ check "snapshot holds the board" "$(git -C "$BENTO_HOME" show HEAD:BOARD.md)" "S
 checkn "snapshot skips the event log" "$(git -C "$BENTO_HOME" ls-files)" "EVENTS.log"
 checkn "snapshot used no personal identity" "$(git -C "$BENTO_HOME" log -1 --format=%ae)" "gmail"
 
+# Inbox: what's waiting on the owner, in an order the owner picks.
+J='Content-Type: application/json'; U=http://127.0.0.1:47470
+newid() { sed -E 's/Added #([0-9]+).*/\1/'; }
+sections() { "$KB" inbox -p inb --json | python3 -c "import json,sys; print(','.join(dict.fromkeys(i['section'] for i in json.load(sys.stdin)['items'])))"; }
+section_of() { "$KB" inbox -p inb --json | python3 -c "import json,sys; print([i['section'] for i in json.load(sys.stdin)['items'] if $1 in i['ids']])"; }
+IB=$("$KB" add "Stuck one" -p inb --to next --done-when x | newid); "$KB" block $IB "which database?" >/dev/null
+IN=$("$KB" add "No finish line" -p inb --to next | newid)
+IR=$("$KB" add "Built it" -p inb --to next --done-when x | newid)
+"$KB" claim $IR --as codex --also >/dev/null; "$KB" review $IR --as codex >/dev/null
+IP=$("$KB" add "Planned" -p inb --done-when x | newid); "$KB" plan implementation "Inbox plan" -p inb --epics $IP >/dev/null
+"$KB" add "Loose idea" --to scratchpad -p inb >/dev/null
+check "inbox lists what's waiting" "$("$KB" inbox -p inb)" "which database?"
+check "inbox default order" "$(sections)" "blocked,plans,review,done-when,scratchpad"
+check "inbox order can be set" "$("$KB" inbox --order review,blocked)" "Inbox order: review, blocked"
+check "inbox follows the order" "$(sections)" "review,blocked"
+checkn "inbox hides sections left out" "$("$KB" inbox -p inb)" "Loose idea"
+check "unknown inbox section refused" "$("$KB" inbox --order review,nope 2>&1)" "Unknown inbox section: nope"
+"$KB" set $IN for sam >/dev/null; "$KB" inbox --order yours,done-when >/dev/null
+check "a card shows in the higher section" "$(section_of $IN)" "['yours']"
+"$KB" inbox --order done-when,yours >/dev/null
+check "and moves when the order changes" "$(section_of $IN)" "['done-when']"
+check "inbox order resets" "$("$KB" inbox --reset)" "blocked, plans, review, done-when, scratchpad"
+check "board data has the inbox" "$(curl -s $U/api/board)" '"inbox_order"'
+check "answer clears a block" "$(code -H "$J" -d "{\"id\":$IB,\"text\":\"Postgres\"}" $U/api/answer)" "200"
+check "answer is noted" "$("$KB" show $IB)" "answered: Postgres"
+checkn "answer unblocks" "$("$KB" show $IB)" "blocked:"
+check "answering an unblocked card refused" "$(code -H "$J" -d "{\"id\":$IB}" $U/api/answer)" "400"
+check "send back needs a comment" "$(code -H "$J" -d "{\"id\":$IR}" $U/api/send-back)" "400"
+check "send back" "$(code -H "$J" -d "{\"id\":$IR,\"comment\":\"needs a test\"}" $U/api/send-back)" "200"
+check "sent back to Doing with the note" "$("$KB" show $IR --json)" '"column": "Doing"'
+check "send back note" "$("$KB" show $IR)" "asked for changes: needs a test"
+check "only Review can be sent back" "$(code -H "$J" -d "{\"id\":$IR,\"comment\":\"x\"}" $U/api/send-back)" "400"
+check "done-when needs text" "$(code -H "$J" -d "{\"id\":$IN,\"field\":\"done when\",\"value\":\" \"}" $U/api/set)" "400"
+check "done-when api" "$(code -H "$J" -d "{\"id\":$IN,\"field\":\"done when\",\"value\":\"it ships\"}" $U/api/set)" "200"
+check "done-when saved" "$("$KB" show $IN)" "done when: it ships"
+code -H "$J" -d "{\"plan\":\"products/inb/plans/implementation-inbox-plan.md\",\"decision\":\"changes\",\"comment\":\"more\"}" $U/api/review >/dev/null
+checkn "changes requested waits on the agent, not the owner" "$("$KB" inbox -p inb)" "Planned"
+check "inbox order api" "$(code -H "$J" -d '{"order":["scratchpad","review"]}' $U/api/inbox-order)" "200"
+check "inbox order api saved" "$(cat "$BENTO_HOME/bento.json")" '"scratchpad"'
+check "inbox order api refuses junk" "$(code -H "$J" -d '{"order":"blocked"}' $U/api/inbox-order)" "400"
+"$KB" inbox --reset >/dev/null
+
 # Reports.
 cd "$T/beta"
 check "report needs a location" "$("$KB" report add "No Where" 2>&1)" "Say where it arrives"
