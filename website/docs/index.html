@@ -143,6 +143,9 @@ kb open</code></pre></li>
     <h2 id="the-bar">Keeping the done-when honest</h2>
     <p>Once someone claims an epic, its done-when only changes with a reason: <code>kb set 12 "done when" "..." --reason "what the old one got wrong"</code>. The reason and the old wording go in the card's notes. When an agent makes the change, it shows in your Inbox until you keep it or put the old one back (<code>kb bar 12 keep</code> or <code>kb bar 12 undo</code>), so nobody can quietly lower the bar.</p>
 
+    <h2 id="testing">Tested before Review</h2>
+    <p>An agent can't hand you work it hasn't tested. After claiming an epic, it writes the checks first with <code>kb test-plan 12</code>. That adds a Testing plan section to the epic's plan doc, or starts a doc of its own when there's no plan. Each check says what to verify, how, and what to expect. Before Review, the agent runs every check and reports what it ran: <code>kb review 12 --as codex --tested "ran all four checks, all passed"</code>. Review refuses work with no testing plan or no report. If something can't be tested yet, the agent says why with <code>--untested "no staging data yet"</code>, and the Inbox flags it next to the work. Your own cards skip the check. To turn it off, set <code>{ "review": { "require_tests": false } }</code> in <code>bento.json</code>.</p>
+
     <h2 id="health">Health, briefings and resuming</h2>
     <p><code>kb health</code> lists everything stuck: blocked epics, claimed work with no update for two days, work waiting in Review for two days, changed done-whens, late or at-risk milestones, and recurring reports that missed one and a half of their scheduled runs. Each line says since when, the next step, and who takes it. It exits 1 when something is stuck, so a scheduled job can alert on it. Change the thresholds in <code>bento.json</code> with <code>{ "health": { "quiet_days": 3, "review_days": 2 } }</code>.</p>
     <p><code>kb digest</code> prints a short Markdown briefing: what's waiting on you, what's in progress, what's up next, milestones, what's stuck, recent decisions, and why work was sent back. API keys, tokens, and passwords are taken out, so you can paste it into a chat assistant. <code>kb digest --out ~/briefing.md --watch</code> keeps a file current.</p>
@@ -209,7 +212,8 @@ kb block 12 "Which?" --option A --option B   ask with choices
 kb answer 12 "text"              answer a blocked card; it becomes a decision (--implies 13,14)
 kb decide "text" --implies 12    record a decision (--supersedes D3 replaces one)
 kb why 12                        the decisions behind a card
-kb review 12 --as codex --note "text" --link https://preview.example.com
+kb test-plan 12                  start the epic's testing plan, before you build
+kb review 12 --as codex --tested "what ran, what passed" --note "text" --link https://preview.example.com
 kb send-back 12 "text" --reason mismatch   send Review work back (broken, unclear, missing, other)
 kb bar 12 keep                   keep an agent's done-when change (or: undo)
 kb ship 14                       mark a milestone reached; unfinished epics move on

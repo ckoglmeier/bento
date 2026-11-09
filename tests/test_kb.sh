@@ -21,6 +21,9 @@ mkdir -p "$T/beta/docs"; printf '# Beta\n' > "$T/beta/docs/notes.md"
 
 cd "$T"
 check "init" "$("$KB" init "$BENTO_HOME" --owner sam 2>&1)" "workspace ready"
+# Most of this file isn't about testing before review, so it's off until that block.
+notests() { python3 -c 'import json,sys; c=json.load(open(sys.argv[1])); c["review"]={"require_tests": False}; json.dump(c, open(sys.argv[1],"w"))' "$BENTO_HOME/bento.json"; }
+notests
 check "connect with import" "$("$KB" connect "$T/alpha" --import-docs)" "Imported 3 docs"
 check "connect from a plain folder" "$(cd "$T/beta" && "$KB" connect --name beta)" "Connected beta"
 check "connect refuses the home folder" "$(HOME="$T/beta" "$KB" connect "$T/beta" 2>&1)" "too broad"
@@ -149,6 +152,7 @@ check "shared setting not edited" "$(cat "$FAKE/.codex/config.toml")" "network_a
 # Push and push back.
 export BENTO_HOME="$T/notify"
 "$KB" init "$BENTO_HOME" --owner sam >/dev/null
+notests
 SENT="$T/sent.txt"; : > "$SENT"
 python3 -c "
 import json,os,sys
@@ -462,7 +466,7 @@ check "health finds a silent report" "$("$KB" health -p pm)" "No copy posted yet
 printf 'ok\n' | "$KB" report post Nightly >/dev/null
 checkn "a fresh report is fine" "$("$KB" health -p pm)" "Nightly"
 M1=$("$KB" add "Beta" -p pm --kind milestone --target 2026-11-01 --needs $P1,$P2 | newid)
-check "late milestone in health" "$("$KB" health -p pm)" "Late: The date has passed."
+check "late milestone in health" "$("$KB" health -p pm)" "Late: The date has passed, since"
 check "ship refuses with nowhere to go" "$("$KB" ship $M1 2>&1)" "are not finished. Say where they go"
 M2=$("$KB" add "GA" -p pm --kind milestone --target 2026-12-15 | newid)
 check "ship moves unfinished epics to the next milestone" "$("$KB" ship $M1)" "Moved #$P1, #$P2 to #$M2 GA"
@@ -492,6 +496,39 @@ c = json.load(open(sys.argv[1])); c["inbox"] = ["review", "blocked"]; c.pop("inb
 PY
 check "new sections join an old saved order" "$("$KB" inbox --json | python3 -c "import json,sys; print(json.load(sys.stdin)['order'])")" "['review', 'changed', 'quiet', 'blocked']"
 "$KB" inbox --reset >/dev/null
+
+# Testing before review.
+python3 -c 'import json,sys; c=json.load(open(sys.argv[1])); c.pop("review"); json.dump(c, open(sys.argv[1],"w"))' "$BENTO_HOME/bento.json"
+T1=$("$KB" add "Tested work" -p qa --to next --done-when "export works" | newid)
+T2=$("$KB" add "Planned work" -p qa --to next --done-when "import works" | newid)
+check "claim asks for a testing plan" "$("$KB" claim $T1 --as codex --also)" "kb test-plan $T1"
+check "resume shows the missing plan" "$("$KB" resume --as codex -p qa)" "Testing plan: none yet"
+check "review refused with no testing plan" "$("$KB" review $T1 --as codex 2>&1)" "has no testing plan"
+check "test-plan starts a doc" "$("$KB" test-plan $T1)" "tests-tested-work.md"
+check "card points at it" "$("$KB" show $T1)" "test plan: products/qa/plans/tests-tested-work.md"
+check "an empty testing plan doesn't count" "$("$KB" review $T1 --as codex 2>&1)" "has no testing plan"
+printf '| Export a board | kb export | a file | |\n' >> "$BENTO_HOME/products/qa/plans/tests-tested-work.md"
+check "review wants a test report" "$("$KB" review $T1 --as codex 2>&1)" "Run the checks in products/qa/plans/tests-tested-work.md first"
+check "both flags refused" "$("$KB" review $T1 --as codex --tested a --untested b 2>&1)" "not both"
+check "review with a test report" "$("$KB" review $T1 --as codex --tested "ran the export check, it passed")" "in Review"
+check "report noted" "$("$KB" show $T1)" "codex: tested: ran the export check, it passed"
+check "inbox shows the report" "$("$KB" inbox)" "Tested: ran the export check, it passed"
+check "inbox json carries the plan" "$("$KB" inbox --json | python3 -c "import json,sys; print([i['tested'] for i in json.load(sys.stdin)['items'] if i['id']==$T1][0])")" "'plan': 'products/qa/plans/tests-tested-work.md'"
+"$KB" claim $T2 --as codex --also >/dev/null
+"$KB" plan implementation "Import" -p qa --epics $T2 >/dev/null
+check "implementation plans have a testing section" "$(cat "$BENTO_HOME/products/qa/plans/implementation-import.md")" "## Testing plan"
+check "test-plan uses the plan doc" "$("$KB" test-plan $T2)" "implementation-import.md"
+python3 - "$BENTO_HOME/products/qa/plans/implementation-import.md" <<'PY'
+import sys; p = sys.argv[1]; t = open(p).read()
+open(p, "w").write(t.replace("| --- | --- | --- | --- |\n", "| --- | --- | --- | --- |\n| Import a sample | kb import | same cards | |\n", 1))
+PY
+check "a filled plan section counts" "$("$KB" test-plan $T2 2>&1)" "already has a testing plan in products/qa/plans/implementation-import.md"
+check "untested is allowed but said out loud" "$("$KB" review $T2 --as codex --untested "no sample board yet")" "in Review"
+check "inbox flags untested work" "$("$KB" inbox)" "NOT TESTED: no sample board yet"
+T3=$("$KB" add "Owner's own" -p qa --to doing | newid)
+check "the owner can review without tests" "$("$KB" review $T3 --as sam)" "in Review"
+T4=$("$KB" add "No home" --to next | newid)
+check "test-plan needs a project" "$("$KB" test-plan $T4 2>&1)" "has no project"
 
 # Every command is in the docs.
 for c in $("$KB" --help | sed -n '/^commands:/,$p' | grep -oE '^    [a-z-]+' | tr -d ' '); do

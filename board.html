@@ -70,7 +70,7 @@
   .item-title:hover { text-decoration: underline; }
   .item .meta { margin-top: 2px; }
   .item-why { overflow-wrap: anywhere; }
-  .item-why.is-warn { color: var(--warn); }
+  .item-why.is-warn, .item-bar.is-warn { color: var(--warn); }
   .item-links { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 4px; }
   .item-link { background: none; border: 0; padding: 0; font-size: 12px; color: var(--accent); text-decoration: underline; text-underline-offset: 2px; overflow-wrap: anywhere; text-align: left; }
   .item-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
@@ -752,6 +752,12 @@ function inboxRow(item) {
   if (meta.children.length) text.append(meta);
   if (item.done_when && (item.section === "review" || item.section === "changed")) {
     text.append(el("div", "item-bar", `Done when: ${item.done_when}`));
+  }
+  if (item.section === "review") {
+    const t = item.tested;
+    text.append(t
+      ? el("div", `item-bar${t.ok ? "" : " is-warn"}`, `${t.ok ? "Tested" : "Not tested"}: ${t.text}`)
+      : el("div", "item-bar is-warn", "No test report"));
   }
   const links = itemLinks(item);
   if (links.children.length) text.append(links);

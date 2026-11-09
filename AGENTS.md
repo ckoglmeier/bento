@@ -33,7 +33,8 @@ A testing epic can't be picked up until the epics it verifies reach Review.
 
 - **"What's next?" is a read.** Run `kb next --as <you>` and answer from it. From a connected project it looks only at that project; add `--all-projects` for everything. Don't claim anything unless {owner} asked you to do the work.
 - **Claim before you start.** Run `kb claim --as <you>`, or `kb claim 12 13 --as <you>` for a set of epics. If it refuses, don't work around it.
-- **Finish into Review, never Done.** Run `kb review <id> --as <you> --note "<what changed>" --link <where to check it>`. The link is a URL (a preview, a staging page, a PR) or a doc in the workspace. {owner} opens it from the Inbox, so always give one.
+- **Write the testing plan before you build.** Right after claiming, run `kb test-plan <id>` and fill in the checks: what you'll verify, how, and what you expect. It goes in the epic's plan doc if it has one.
+- **Run the tests before Review.** Run every check in the testing plan and record the results there. Then finish into Review, never Done: `kb review <id> --as <you> --tested "<what you ran and what happened>" --note "<what changed>" --link <where to check it>`. Review refuses without a testing plan and `--tested`. If something truly can't be tested yet, say why with `--untested "<why>"`; {owner} sees it flagged. The link is a URL (a preview, a staging page, a PR) or a doc in the workspace. {owner} opens it from the Inbox, so always give one.
 - **Work for {owner}** (`for: {owner}`) needs a link too: `kb set <id> link <url or doc>`, so {owner} knows what to open.
 - **Start of a session:** run `kb resume --as <you>` to see what you hold, what came back from {owner}, and what to do next.
 - **Stuck?** Run `kb block <id> "<what you need>"` and tell {owner}. When there are clear choices, offer them: `kb block <id> "Which provider?" --option Stripe --option Paddle`. Don't guess past a real decision.
@@ -114,7 +115,8 @@ kb why 12                        the decisions behind a card
 kb decide "text" --implies 12    record a decision {owner} made
 kb health                        everything stuck, since when, and who's next
 kb digest                        a short Markdown briefing of the board
-kb review 12 --as codex --note "text" --link https://preview.example.com
+kb test-plan 12                  start the epic's testing plan, before you build
+kb review 12 --as codex --tested "what ran, what passed" --note "text" --link https://preview.example.com
 kb move 12 next --top            move or release a card ({owner}'s call for Next and Done)
 kb calendar                      milestones and their dependencies (-p my-app, --json)
 kb docs                          product docs and plans (--long, --all-projects)

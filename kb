@@ -1034,7 +1034,12 @@ def inbox(board, config=None, project=None):
             "source": card.get("source"), "links": card_links(card),
             "options": card_options(card) if kind == "blocked" else [],
             "done_when": card.get("done when"),
+            "tested": None,
         }
+        if kind == "review":
+            result = test_result(card)
+            if result:
+                item["tested"] = {"ok": result[0], "text": result[1], "plan": test_plan(card)}
         if kind == "plans":
             if item["plan"] in plans:
                 plans[item["plan"]]["ids"].append(card.id)
@@ -1516,6 +1521,8 @@ def resume(board, who, project=None):
                 out.append("    Done when: %s" % c.get("done when"))
             if c.get("plan"):
                 out.append("    Plan: %s" % c.get("plan"))
+            if review_needs_tests():
+                out.append("    Testing plan: %s" % (test_plan(c) or "none yet (kb test-plan %d)" % c.id))
     back = []
     for s, c in mine:
         notes = card_notes(c)
@@ -1646,6 +1653,8 @@ def cmd_inbox(args):
             if item["why"]:
                 line += "  %s" % item["why"]
             print(line)
+            if item.get("tested"):
+                print("    %s: %s" % ("Tested" if item["tested"]["ok"] else "NOT TESTED", item["tested"]["text"]))
         print()
 
 
@@ -1711,7 +1720,10 @@ def cmd_claim(args):
             card.set("claimed", "%s %s" % (who, today()))
             move_card(board, card, "Doing")
             texts.append(card.markdown())
+        untested = [c.id for c in cards if not test_plan(c)] if review_needs_tests() else []
     print("Claimed by %s:\n\n%s" % (who, "\n\n".join(texts)))
+    if untested:
+        print("\nWrite the testing plan before you build: %s" % "; ".join("kb test-plan %d" % i for i in untested))
 
 
 def set_kind(card, kind):
@@ -1757,12 +1769,115 @@ def cmd_add(args):
 
 
 PLAN_TEMPLATES = {
-    "implementation": "## Goal\n\n## Epics\n\n{epics}\n\n## Approach\n\n## Out of scope\n\n## Risks and open questions\n\n## Done when\n",
+    "implementation": "## Goal\n\n## Epics\n\n{epics}\n\n## Approach\n\n## Out of scope\n\n## Risks and open questions\n\n"
+    + "{testing}## Done when\n",
     "testing": "## What this verifies\n\n{epics}\n\n## Environments\n\n## Checks\n\n| Check | How | Expected | Result |\n| --- | --- | --- | --- |\n\n## Failure and recovery cases\n\n## Results\n",
     "release": "## Theme\n\n## What ships\n\n{epics}\n\n## Acceptance criteria\n\n## Rollout steps\n\n## Rollback\n\n## Release notes\n\n## After release\n",
     "milestone": "## Theme\n\n## What's in it\n\n{epics}\n\n## Acceptance criteria\n\n## Release notes\n\n## After it lands\n",
     "writing": "## The piece\n\n{epics}\n\n## Audience\n\n## Outline\n\n## Channel and publish date\n\n## What it warms up\n",
 }
+
+# ---- Testing before review ---------------------------------------------------
+
+TEST_PLAN = (
+    "## Testing plan\n\n"
+    "<!-- Write the checks before you build. Run every one before kb review, and fill in Result. -->\n\n"
+    "| Check | How | Expected | Result |\n| --- | --- | --- | --- |\n\n"
+)
+TEST_SECTIONS = ("testing plan", "checks")
+HEADING = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
+TABLE_RULE = re.compile(r"^\|?[\s:|-]*-{3,}[\s:|-]*$")
+
+
+def doc_section(text, names):
+    """The lines under the first heading called one of names, or None if there's no such heading."""
+    out, level = None, 0
+    for line in text.splitlines():
+        m = HEADING.match(line)
+        if m:
+            if out is not None and len(m.group(1)) <= level:
+                break
+            if out is None and m.group(2).strip().lower() in names:
+                out, level = [], len(m.group(1))
+                continue
+        if out is not None:
+            out.append(line)
+    return out
+
+
+def has_content(lines):
+    """True if the lines hold more than blanks, comments and an empty table's header."""
+    lines = [l.strip() for l in lines or []]
+    for i, line in enumerate(lines):
+        if not line or line.startswith("<!--") or TABLE_RULE.match(line):
+            continue
+        if line.startswith("|") and i + 1 < len(lines) and TABLE_RULE.match(lines[i + 1]):
+            continue  # a table's header row
+        return True
+    return False
+
+
+def test_plan(card):
+    """Where this epic's testing plan is written, or None if it hasn't been yet."""
+    for field in ("test plan", "plan"):
+        ref = card.get(field)
+        if not ref:
+            continue
+        try:
+            with open(os.path.join(home_dir(), ref.partition("#")[0]), encoding="utf-8") as f:
+                lines = doc_section(f.read(), TEST_SECTIONS)
+        except OSError:
+            continue
+        if has_content(lines):
+            return ref.partition("#")[0]
+    return None
+
+
+def test_result(card):
+    """The latest test report on a card: (True, what ran), (False, why not), or None."""
+    for note in reversed(card_notes(card)):
+        if note[2].startswith("tested: "):
+            return True, note[2][len("tested: "):]
+        if note[2].startswith("not tested: "):
+            return False, note[2][len("not tested: "):]
+    return None
+
+
+def review_needs_tests():
+    return read_config().get("review", {}).get("require_tests", True)
+
+
+def start_test_plan(id):
+    """Give an epic a Testing plan section: in its plan doc if it has one, else in a doc of its own."""
+    with locked() as board:
+        _, card = board.find(id)
+        done = test_plan(card)
+        if done:
+            raise KbError("#%d already has a testing plan in %s." % (card.id, done))
+        for field in ("test plan", "plan"):
+            ref = (card.get(field) or "").partition("#")[0]
+            full = os.path.join(home_dir(), ref)
+            if ref and os.path.isfile(full):
+                with open(full, encoding="utf-8") as f:
+                    text = f.read()
+                if doc_section(text, TEST_SECTIONS) is None:
+                    marker = re.search(r"^## Done when\s*$", text, re.M)
+                    at = marker.start() if marker else len(text)
+                    gap = "" if at == 0 or text[:at].endswith("\n\n") else ("\n" if text[:at].endswith("\n") else "\n\n")
+                    atomic_write(full, text[:at] + gap + TEST_PLAN + text[at:])
+                return ref
+        project = card.get("project")
+        if not project:
+            raise KbError("#%d has no project. Set one first: kb set %d project <name>" % (card.id, card.id))
+        folder = os.path.join(home_dir(), "products", project, "plans")
+        os.makedirs(folder, exist_ok=True)
+        full = os.path.join(folder, "tests-%s.md" % (slug(card.title).strip("-") or str(card.id)))
+        rel = os.path.relpath(full, home_dir())
+        if not os.path.exists(full):
+            atomic_write(full, "# Testing plan: #%d %s\n\nDone when: %s\n\n%s" % (
+                card.id, one_line(card.title), card.get("done when") or "(not set)", TEST_PLAN))
+        card.set("test plan", rel)
+        return rel
 
 
 def create_plan(kind, project, title, ids):
@@ -1788,7 +1903,7 @@ def create_plan(kind, project, title, ids):
                     listed.append(board.find(dep)[1])
     epics = "\n".join("- #%d %s" % (c.id, c.title) for c in listed) or "- (none linked yet)"
     heading = one_line(title) if kind == "milestone" else "%s plan: %s" % (kind.capitalize(), one_line(title))
-    atomic_write(full, "# %s\n\n%s" % (heading, PLAN_TEMPLATES[kind].format(epics=epics)))
+    atomic_write(full, "# %s\n\n%s" % (heading, PLAN_TEMPLATES[kind].format(epics=epics, testing=TEST_PLAN)))
     return rel
 
 
@@ -1939,12 +2054,34 @@ def cmd_review(args):
             raise KbError("#%d is claimed by %s, not %s." % (card.id, holder, who))
         if section.name.lower() == "done":
             raise KbError("#%d is already Done." % card.id)
+        if args.tested and args.untested:
+            raise KbError("Pass --tested or --untested, not both.")
+        if args.untested:
+            card.note("not tested: " + one_line(args.untested), who)
+        elif who != owner().lower() and review_needs_tests():
+            plan = test_plan(card)
+            if not plan:
+                raise KbError(
+                    "#%d has no testing plan. Write one before handing it over: kb test-plan %d" % (card.id, card.id)
+                )
+            if not args.tested:
+                raise KbError(
+                    "Run the checks in %s first, then say what you ran and what happened: "
+                    "kb review %d --as %s --tested \"...\"" % (plan, card.id, who)
+                )
+        if args.tested:
+            card.note("tested: " + one_line(args.tested), who)
         if args.note:
             card.note(args.note, who)
         if args.link:
             card.set("link", args.link)
         move_card(board, card, "Review")
     print("#%d is in Review." % args.id)
+
+
+def cmd_test_plan(args):
+    rel = start_test_plan(args.id)
+    print("Write the checks under 'Testing plan' in %s, before you build." % os.path.join(home_dir(), rel))
 
 
 def cmd_delete(args):
@@ -2825,7 +2962,13 @@ def build_parser():
     p.add_argument("id", type=int)
     p.add_argument("--note")
     p.add_argument("--link", help="where to check the work: a URL or a doc in the workspace")
+    p.add_argument("--tested", help="what you ran from the testing plan, and what happened")
+    p.add_argument("--untested", metavar="WHY", help="hand it over without testing, and say why (the owner sees it)")
     p.set_defaults(func=cmd_review)
+
+    p = sub.add_parser("test-plan", help="start an epic's testing plan, in its plan doc or a doc of its own")
+    p.add_argument("id", type=int)
+    p.set_defaults(func=cmd_test_plan)
 
     p = sub.add_parser("delete", help="delete a card; it goes to TRASH.md")
     p.add_argument("id", type=int)
