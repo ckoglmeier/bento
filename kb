@@ -921,6 +921,7 @@ def board_json(board):
 
 INBOX_SECTIONS = {
     "blocked": "Blocked until you answer",
+    "asked": "Started on your word",
     "plans": "Plans to approve",
     "review": "Finished work to accept",
     "changed": "Done-whens an agent changed",
@@ -981,6 +982,8 @@ def inbox_sections_for(section, card, me):
         hits.append("blocked")
     if card.get("plan") and not card.get("approved") and not blocked and column != "review":
         hits.append("plans")
+    if card.get("asked"):
+        hits.append("asked")
     if column == "review":
         hits.append("review")
     if card.get("done when changed"):
@@ -992,6 +995,15 @@ def inbox_sections_for(section, card, me):
     if (card.get("for") or "").lower() == me and column != "review":
         hits.append("yours")
     return hits
+
+
+def asked_words(card):
+    """What the agent says the owner asked for, from its claim note."""
+    for note in reversed(card_notes(card)):
+        m = re.match(r'claimed from Backlog on [^\s]+ word: (.*)$', note[2])
+        if m:
+            return "%s says you asked: %s" % (note[1] or "An agent", m.group(1))
+    return "Claimed by %s from Backlog" % (card.get("asked") or "?").split(" ")[0]
 
 
 def card_links(card):
@@ -1027,6 +1039,7 @@ def inbox(board, config=None, project=None):
             "changed": "%s changed it. Was: %s" % (
                 (card.get("done when changed") or "").split(" ")[0], card.get("done when was") or "(none)"),
             "quiet": "No update from %s since %s" % ((card.get("claimed") or "?").split(" ")[0], quiet_since(card)),
+            "asked": asked_words(card),
         }.get(kind)
         item = {
             "section": kind, "id": card.id, "ids": [card.id], "title": card.title, "column": section.name,
@@ -1238,6 +1251,21 @@ def change_done_when(board, section, card, value, who, reason=None, require_reas
             card.set("done when changed", "%s %s" % (who or "someone", today()))
         board.log(card, "bar changed", reason=reason)
     card.set("done when", value or None)
+
+
+def confirm_asked(board, id, keep, who):
+    """The owner settles work an agent claimed from Backlog on their word: keep it, or stop it."""
+    section, card = board.find(id)
+    if not card.get("asked"):
+        raise KbError("#%d wasn't claimed on your word." % card.id)
+    card.set("asked", None)
+    if keep:
+        card.note("confirmed: I asked for this", who)
+        return
+    card.note("stopped: I didn't ask for this", who)
+    card.set("claimed", None)
+    if section.name.lower() in ("doing", "review"):
+        move_card(board, card, "Backlog")
 
 
 def settle_bar(card, keep, who):
@@ -1701,11 +1729,23 @@ def cmd_claim(args):
             raise KbError(
                 "%s already holds #%d. Finish it first, or pass --also to work in parallel." % (who, held[0].id)
             )
+        asked = one_line(args.asked or "")
+        if args.asked is not None and not asked:
+            raise KbError("Quote what %s asked for: --asked \"...\"" % owner())
+        if asked and not args.ids:
+            raise KbError("Name the card %s asked for: kb claim <id> --as %s --asked \"...\"" % (owner(), who))
         if args.ids:
             cards = []
             for id in args.ids:
                 section, card = board.find(id)
-                if section.name.lower() != "next":
+                column = section.name.lower()
+                if column == "backlog" and not asked:
+                    raise KbError(
+                        "#%d is in Backlog, not Next. If %s asked you for it, claim it with their words: "
+                        "kb claim %d --as %s --asked \"<what %s said>\". Otherwise ask %s to move it to Next."
+                        % (card.id, owner(), card.id, who, owner(), owner())
+                    )
+                if column not in ("next", "backlog"):
                     raise KbError("#%d is in %s, not Next, so it can't be claimed." % (card.id, section.name))
                 reason = why_not_ready(board, card, who)
                 if reason:
@@ -1717,6 +1757,9 @@ def cmd_claim(args):
                 raise KbError("Nothing in Next can be picked up by %s. Run: kb next --as %s" % (who, who))
             cards = [card]
         for card in cards:
+            if asked and board.find(card.id)[0].name.lower() == "backlog":
+                card.note("claimed from Backlog on %s's word: \"%s\"" % (owner(), asked), who)
+                card.set("asked", "%s %s" % (who, today()))
             card.set("claimed", "%s %s" % (who, today()))
             move_card(board, card, "Doing")
             texts.append(card.markdown())
@@ -2217,6 +2260,12 @@ def cmd_bar(args):
     print("#%d's done-when: %s." % (args.id, "kept the new one" if args.action == "keep" else "put back"))
 
 
+def cmd_confirm(args):
+    with locked() as board:
+        confirm_asked(board, args.id, not args.stop, (args.who or owner()).lower())
+    print("#%d: %s." % (args.id, "confirmed" if not args.stop else "stopped and back in Backlog"))
+
+
 def cmd_send_back(args):
     with locked() as board:
         section, card = board.find(args.id)
@@ -2663,6 +2712,11 @@ def api_ship(data):
         return {"message": ship(board, int(data["id"]), owner().lower())}
 
 
+def api_confirm(data):
+    with locked() as board:
+        confirm_asked(board, int(data["id"]), data.get("decision") == "keep", owner().lower())
+
+
 def api_bar(data):
     with locked() as board:
         settle_bar(board.find(int(data["id"]))[1], data.get("decision") == "keep", owner().lower())
@@ -2717,7 +2771,7 @@ def make_handler(port):
         "/api/move": api_move, "/api/add": api_add, "/api/edit": api_edit,
         "/api/review": api_review, "/api/set": api_set, "/api/delete": api_delete, "/api/doc-save": api_doc_save, "/api/milestone-doc": api_milestone_doc, "/api/archive": lambda d: archive_done(),
         "/api/answer": api_answer, "/api/send-back": api_send_back, "/api/inbox-order": api_inbox_order,
-        "/api/ship": api_ship, "/api/bar": api_bar,
+        "/api/ship": api_ship, "/api/bar": api_bar, "/api/confirm": api_confirm,
     }
 
     class Handler(http.server.BaseHTTPRequestHandler):
@@ -2903,7 +2957,13 @@ def build_parser():
     p = sub.add_parser("claim", parents=[who, where], help="take cards from Next")
     p.add_argument("ids", type=int, nargs="*")
     p.add_argument("--also", action="store_true", help="take more while holding a card")
+    p.add_argument("--asked", metavar="WORDS", help="claim from Backlog because the owner asked; quote them")
     p.set_defaults(func=cmd_claim)
+
+    p = sub.add_parser("confirm", parents=[who], help="confirm work an agent claimed on your word, or --stop it")
+    p.add_argument("id", type=int)
+    p.add_argument("--stop", action="store_true", help="you didn't ask for it: release it back to Backlog")
+    p.set_defaults(func=cmd_confirm)
 
     p = sub.add_parser("add", parents=[who], help="add an epic (to Backlog by default)")
     p.add_argument("title")

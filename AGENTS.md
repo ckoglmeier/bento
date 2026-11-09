@@ -33,6 +33,7 @@ A testing epic can't be picked up until the epics it verifies reach Review.
 
 - **"What's next?" is a read.** Run `kb next --as <you>` and answer from it. From a connected project it looks only at that project; add `--all-projects` for everything. Don't claim anything unless {owner} asked you to do the work.
 - **Claim before you start.** Run `kb claim --as <you>`, or `kb claim 12 13 --as <you>` for a set of epics. If it refuses, don't work around it.
+- **Work {owner} asks you for directly** can start from Backlog. Add it with `kb add` if it isn't on the board, then claim it with {owner}'s words: `kb claim 12 --as <you> --asked "<what {owner} said>"`. Quote them; don't paraphrase a yes out of a maybe. {owner} sees it in the Inbox and can stop it. Never use `--asked` for work you only noticed.
 - **Write the testing plan before you build.** Right after claiming, run `kb test-plan <id>` and fill in the checks: what you'll verify, how, and what you expect. It goes in the epic's plan doc if it has one.
 - **Run the tests before Review.** Run every check in the testing plan and record the results there. Then finish into Review, never Done: `kb review <id> --as <you> --tested "<what you ran and what happened>" --note "<what changed>" --link <where to check it>`. Review refuses without a testing plan and `--tested`. If something truly can't be tested yet, say why with `--untested "<why>"`; {owner} sees it flagged. The link is a URL (a preview, a staging page, a PR) or a doc in the workspace. {owner} opens it from the Inbox, so always give one.
 - **Work for {owner}** (`for: {owner}`) needs a link too: `kb set <id> link <url or doc>`, so {owner} knows what to open.
@@ -100,6 +101,7 @@ kb next --as codex               best card for you, changes nothing
 kb inbox                         what's waiting on {owner} (--order blocked,review,plans to change it)
 kb show 12                       one card in full
 kb claim --as codex              take the best card (or: kb claim 12 13 --as codex)
+kb claim 12 --as codex --asked "..."   take a Backlog card {owner} asked for, in their words
 kb add "title" --kind testing --verifies 12,13 --done-when "..."
 kb plan testing "Search" --epics 14
 kb push 12 13 --to claude --plan <path> --as codex

@@ -368,7 +368,7 @@ check "unknown inbox section refused" "$("$KB" inbox --order review,nope 2>&1)" 
 check "a card shows in the higher section" "$(section_of $IN)" "['yours']"
 "$KB" inbox --order done-when,yours >/dev/null
 check "and moves when the order changes" "$(section_of $IN)" "['done-when']"
-check "inbox order resets" "$("$KB" inbox --reset)" "blocked, plans, review, changed, done-when, quiet, yours, milestones, scratchpad"
+check "inbox order resets" "$("$KB" inbox --reset)" "blocked, asked, plans, review, changed, done-when, quiet, yours, milestones, scratchpad"
 check "board data has the inbox" "$(curl -s $U/api/board)" '"inbox_order"'
 check "answer clears a block" "$(code -H "$J" -d "{\"id\":$IB,\"text\":\"Postgres\"}" $U/api/answer)" "200"
 check "answer is noted as a decision" "$("$KB" show $IB)" "answered (D1): Postgres"
@@ -494,7 +494,7 @@ python3 - "$BENTO_HOME/bento.json" <<'PY'
 import json, sys
 c = json.load(open(sys.argv[1])); c["inbox"] = ["review", "blocked"]; c.pop("inbox_seen", None); json.dump(c, open(sys.argv[1], "w"))
 PY
-check "new sections join an old saved order" "$("$KB" inbox --json | python3 -c "import json,sys; print(json.load(sys.stdin)['order'])")" "['review', 'changed', 'quiet', 'blocked']"
+check "new sections join an old saved order" "$("$KB" inbox --json | python3 -c "import json,sys; print(json.load(sys.stdin)['order'])")" "['review', 'changed', 'quiet', 'blocked', 'asked']"
 "$KB" inbox --reset >/dev/null
 
 # Testing before review.
@@ -529,6 +529,25 @@ T3=$("$KB" add "Owner's own" -p qa --to doing | newid)
 check "the owner can review without tests" "$("$KB" review $T3 --as sam)" "in Review"
 T4=$("$KB" add "No home" --to next | newid)
 check "test-plan needs a project" "$("$KB" test-plan $T4 2>&1)" "has no project"
+
+# Work the owner asks for directly.
+A1=$("$KB" add "Site directions" -p qa --done-when "three directions to compare" | newid)
+check "backlog claim says how" "$("$KB" claim $A1 --as codex --also 2>&1)" "kb claim $A1 --as codex --asked"
+check "asked needs words" "$("$KB" claim $A1 --as codex --also --asked " " 2>&1)" "Quote what sam asked for"
+check "asked needs a card" "$("$KB" claim --as codex --also --asked "go" 2>&1)" "Name the card"
+check "claim from backlog on the owner's word" "$("$KB" claim $A1 --as codex --also --asked "build the site directions")" "Claimed by codex"
+check "words noted" "$("$KB" show $A1)" "codex: claimed from Backlog on sam's word: \"build the site directions\""
+check "card is in Doing" "$("$KB" show $A1)" "[Doing]"
+check "inbox shows it" "$("$KB" inbox)" "codex says you asked: \"build the site directions\""
+check "confirm" "$("$KB" confirm $A1)" "confirmed"
+checkn "confirmed leaves the inbox" "$("$KB" inbox)" "says you asked"
+check "confirm twice refused" "$("$KB" confirm $A1 2>&1)" "wasn't claimed on your word"
+A2=$("$KB" add "Unasked" -p qa | newid)
+"$KB" claim $A2 --as codex --also --asked "do it" >/dev/null
+check "stop via api" "$(code -H "$J" -d "{\"id\":$A2,\"decision\":\"stop\"}" $U/api/confirm)" "200"
+check "stopped goes back to Backlog" "$("$KB" show $A2)" "[Backlog]"
+check "stopped is unclaimed" "$("$KB" show $A2 | grep -c claimed:)" "0"
+check "scratchpad still can't be claimed" "$("$KB" claim $("$KB" add "idea" --to scratchpad | newid) --as codex --also --asked "x" 2>&1)" "not Next"
 
 # Every command is in the docs.
 for c in $("$KB" --help | sed -n '/^commands:/,$p' | grep -oE '^    [a-z-]+' | tr -d ' '); do

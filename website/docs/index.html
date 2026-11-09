@@ -120,7 +120,7 @@ kb open</code></pre></li>
     <h2 id="the-board">The board</h2>
     <p><code>kb open</code> opens the board at <code>http://127.0.0.1:4747</code>, and starts it in the background if it isn't running. You can also tell your agent "open bento". The board has five views:</p>
     <ul>
-      <li><strong>Inbox:</strong> one ranked queue of everything waiting on you: blocked cards, plans to approve, finished work to accept, done-whens an agent changed, Next cards missing a done-when, work that's gone quiet, epics assigned to you, milestones past their date, and Scratchpad notes. Each item links to what to check: the URL or doc an agent gave with <code>kb review --link</code>, the source doc, and the plan. Clear it from the keyboard. <kbd>j</kbd> and <kbd>k</kbd> move, <kbd>a</kbd> approves or accepts, <kbd>r</kbd> requests changes or sends work back, <kbd>1</kbd> to <kbd>9</kbd> pick an agent's offered option, and <kbd>Enter</kbd> opens the card. Sending work back asks why: it doesn't match the done-when, it doesn't work, you can't tell if it works, or something's missing. Copy briefing puts a summary of the board on your clipboard. Use Change order to pick which sections show and in what order, or run <code>kb inbox --order blocked,review,plans</code>.</li>
+      <li><strong>Inbox:</strong> one ranked queue of everything waiting on you: blocked cards, work an agent started on your word, plans to approve, finished work to accept, done-whens an agent changed, Next cards missing a done-when, work that's gone quiet, epics assigned to you, milestones past their date, and Scratchpad notes. Each item links to what to check: the URL or doc an agent gave with <code>kb review --link</code>, the source doc, and the plan. Clear it from the keyboard. <kbd>j</kbd> and <kbd>k</kbd> move, <kbd>a</kbd> approves or accepts, <kbd>r</kbd> requests changes or sends work back, <kbd>1</kbd> to <kbd>9</kbd> pick an agent's offered option, and <kbd>Enter</kbd> opens the card. Sending work back asks why: it doesn't match the done-when, it doesn't work, you can't tell if it works, or something's missing. Copy briefing puts a summary of the board on your clipboard. Use Change order to pick which sections show and in what order, or run <code>kb inbox --order blocked,review,plans</code>.</li>
       <li><strong>Delivery:</strong> what to take up next, what each item still needs from you, and what is ready to verify.</li>
       <li><strong>Calendar:</strong> milestones across projects, and how the work feeding each one stands. Drag a milestone onto a date to move it.</li>
       <li><strong>Scratchpad:</strong> loose notes and ideas. Agents never pick these up, and any of them can become an epic. Say "note for bento" in Claude Code or Codex, and the agent saves a short summary of the discussion here.</li>
@@ -134,6 +134,7 @@ kb open</code></pre></li>
       <tr><td>Review</td><td>Finished, waiting for you to check</td><td>Whoever did the work</td></tr>
       <tr><td>Done</td><td>You accepted it</td><td>You only</td></tr>
     </table></div>
+    <p>Agents claim from Next. The exception is work you ask an agent for directly, in conversation. The agent claims it straight from Backlog and quotes you: <code>kb claim 40 --as codex --asked "build the site directions"</code>. Your words go on the card, and the card waits under "Started on your word" in your Inbox. Click That's right to confirm it, or Stop it to send it back to Backlog. From the command line, that's <code>kb confirm 40</code> or <code>kb confirm 40 --stop</code>.</p>
 
     <h2 id="decisions">Decisions</h2>
     <p>An agent that needs you blocks its epic with a question, and can offer choices:</p>
@@ -199,6 +200,8 @@ kb next --as codex               best card for you, changes nothing
 kb inbox                         what's waiting on you (--order blocked,review,plans to change it)
 kb show 12                       one card in full
 kb claim --as codex              take the best card (or: kb claim 12 13 --as codex)
+kb claim 12 --as codex --asked "..."   take a Backlog card you asked for, in your words
+kb confirm 12                    confirm work claimed on your word (--stop sends it back)
 kb add "title" --done-when "..."  add an epic to Backlog
 kb add "title" --to scratchpad   save a note or idea
 kb plan testing "Search" --epics 14

@@ -591,6 +591,7 @@ function columnCards(name) {
 
 const INBOX_DO = {
   blocked: [["Answer", "answer"]],
+  asked: [["That's right", "confirm"], ["Stop it", "stop"]],
   plans: [["Approve", "approve"], ["Request changes", "changes"]],
   review: [["Accept", "accept"], ["Send back", "sendback"]],
   changed: [["Keep it", "keepbar"], ["Put it back", "undobar"]],
@@ -684,6 +685,7 @@ function inboxDo(item, verb) {
   if (verb === "promote") return act("/api/move", { id: item.id, column: "Backlog" });
   if (verb === "open") return openItem(item);
   if (verb === "keepbar" || verb === "undobar") return act("/api/bar", { id: item.id, decision: verb === "keepbar" ? "keep" : "undo" });
+  if (verb === "confirm" || verb === "stop") return act("/api/confirm", { id: item.id, decision: verb === "confirm" ? "keep" : "stop" });
   if (verb === "release") return act("/api/move", { id: item.id, column: "Next" });
   if (verb === "ship") return act("/api/ship", { id: item.id });
 }
