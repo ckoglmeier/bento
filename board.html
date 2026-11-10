@@ -477,7 +477,7 @@ function renderCard(card) {
   if (card.column === "Next" && card.not_ready) node.classList.add("waiting");
 
   const title = el("span", "title");
-  title.append(el("span", "id", `#${card.id} `), document.createTextNode(card.title));
+  title.append(el("span", "id", `${card.id} `), document.createTextNode(card.title));
   node.append(title);
 
   const meta = el("span", "meta");
@@ -541,7 +541,7 @@ function renderColumn(column) {
     const id = dragId;
     dragId = null;
     clearMarks();
-    act("/api/move", { id, column: column.name, before: after ? Number(after.dataset.id) : null });
+    act("/api/move", { id, column: column.name, before: after ? after.dataset.id : null });
   });
 
   section.append(head, list);
@@ -746,7 +746,7 @@ function inboxRow(item) {
 
   const text = el("div");
   const title = button("item-title", "", () => openItem(item));
-  title.append(el("span", "id", item.ids.map((n) => `#${n}`).join(" ") + " "), document.createTextNode(item.title));
+  title.append(el("span", "id", item.ids.join(" ") + " "), document.createTextNode(item.title));
   const meta = el("span", "meta");
   if (item.project) meta.append(el("span", "project", item.project));
   if (item.why) meta.append(el("span", `item-why${item.section === "blocked" ? " is-warn" : ""}`, item.why));
@@ -1000,7 +1000,7 @@ function renderCalendar(main) {
   const rows = state.tracking
     .map((row) => ({ ...row, card: cardById(row.id) }))
     .filter((row) => row.card && (!filters.project || row.card.fields.project === filters.project))
-    .sort((a, b) => (a.target || "9999").localeCompare(b.target || "9999") || a.id - b.id);
+    .sort((a, b) => (a.target || "9999").localeCompare(b.target || "9999") || a.id.localeCompare(b.id, undefined, { numeric: true }));
   if (!calMonth) {
     const first = rows.find((r) => r.target && r.target >= state.today);
     const [y, m] = (first ? first.target : state.today).split("-").map(Number);
@@ -1035,7 +1035,7 @@ function renderCalendar(main) {
     makeDateDroppable(cell, iso);
     rows.filter((r) => r.target === iso).forEach((r) => {
       const chip = button(`cal-chip ${statusClass(r.status)}`, r.card.title, () => openDialog(r.card));
-      chip.title = `#${r.id} ${r.card.title} (${r.status})`;
+      chip.title = `${r.id} ${r.card.title} (${r.status})`;
       makeMilestoneDraggable(chip, r);
       cell.append(chip);
     });
@@ -1049,7 +1049,7 @@ function renderCalendar(main) {
     const box = el("div", "track");
     makeMilestoneDraggable(box, row);
     const top = el("div", "track-top");
-    top.append(button("track-title", `#${row.id} ${row.card.title}`, () => openDialog(row.card)));
+    top.append(button("track-title", `${row.id} ${row.card.title}`, () => openDialog(row.card)));
     if (row.card.fields.project) top.append(el("span", "project", row.card.fields.project));
     const date = el("input");
     date.type = "date";
@@ -1075,7 +1075,7 @@ function renderCalendar(main) {
       row.deps.forEach((d) => {
         const cls = d.column === "Done" ? "is-done" : d.blocked ? "is-blocked" : "";
         const when = d.target ? `, ${d.target}` : "";
-        deps.append(el("li", cls, `#${d.id} ${d.title}: ${d.column}${d.blocked ? ", blocked" : ""}${when}`));
+        deps.append(el("li", cls, `${d.id} ${d.title}: ${d.column}${d.blocked ? ", blocked" : ""}${when}`));
       });
       box.append(el("div", "track-why", ""));
       box.lastChild.style.color = "var(--muted)";
@@ -1184,7 +1184,7 @@ $("f-project").addEventListener("input", () => setBodyField("project", $("f-proj
 $("f-body").addEventListener("input", syncProjectFromBody);
 $("cancel").addEventListener("click", () => $("dialog").close());
 $("delete").addEventListener("click", async () => {
-  if (!editing || !confirm(`Delete #${editing.id} ${editing.title}?\n\nIt moves to TRASH.md, and kb restore ${editing.id} brings it back.`)) return;
+  if (!editing || !confirm(`Delete ${editing.id} ${editing.title}?\n\nIt moves to TRASH.md, and kb restore ${editing.id} brings it back.`)) return;
   try {
     await post("/api/delete", { id: editing.id });
     $("dialog").close();
