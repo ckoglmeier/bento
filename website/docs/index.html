@@ -143,6 +143,8 @@ kb open</code></pre></li>
     <p>You pick one in the Inbox, or type your own answer. Every answer is saved as a decision in <code>DECISIONS.md</code>, numbered D1, D2 and on. Mention other epics in it, such as "Stripe, and the same for MA13", and the decision is noted on them too. From the command line, <code>kb answer MA12 Stripe --implies MA13,MA14</code> does the same, and <code>kb decide "We launch in the US first" --implies MA12,MA13</code> records one you made in a conversation. Change your mind with <code>kb decide "Paddle after all" --supersedes D3</code>, and every epic D3 touched is told. <code>kb why MA12</code> lists the decisions behind an epic, and the card shows them on the board.</p>
 
     <h2 id="the-bar">Keeping the done-when honest</h2>
+    <p>Agents don't wait for you to accept an epic before starting the next one. An epic can be claimed once every epic it needs is in Review or Done. If a need is still in Review, the claim is marked <code>builds on review: MA12</code> and the card appears under "Work built on unaccepted epics" in your Inbox. If you send the needed epic back, the Inbox says so on the dependent epics. Needs still in Backlog, Next or Doing refuse the claim, and <code>--asked</code> claims follow the same rule.</p>
+
     <p>Once someone claims an epic, its done-when only changes with a reason: <code>kb set MA12 "done when" "..." --reason "what the old one got wrong"</code>. The reason and the old wording go in the card's notes. When an agent makes the change, it shows in your Inbox until you keep it or put the old one back (<code>kb bar MA12 keep</code> or <code>kb bar MA12 undo</code>), so nobody can quietly lower the bar.</p>
 
     <h2 id="testing">Tested before Review</h2>

@@ -19,6 +19,8 @@ There are four kinds of epic, and each can have a plan:
 
 A testing epic can't be picked up until the epics it verifies reach Review.
 
+An epic can be claimed once every epic it `needs` is in Review or Done. Needs still in Backlog, Next or Doing refuse the claim. If a need is only in Review, the claim is marked `builds on review: <ids>` and shows in {owner}'s Inbox as work built on unaccepted epics, with or without `--asked`. If {owner} sends a needed epic back, the Inbox flags the dependent epics so they can be redone.
+
 ## Columns
 
 | Column | Meaning | Who puts cards here |
@@ -34,6 +36,7 @@ A testing epic can't be picked up until the epics it verifies reach Review.
 ## What agents may do
 
 - **"What's next?" is a read.** Run `kb next --as <you>` and answer from it. From a connected project it looks only at that project; add `--all-projects` for everything. Don't claim anything unless {owner} asked you to do the work.
+- **Build past Review.** Don't wait for {owner} to accept an epic you need. If it's in Review, claim the next one anyway; Bento marks the claim as resting on unaccepted work. If a needed epic is sent back, check what you built on it.
 - **Claim before you start.** Run `kb claim --as <you>`, or `kb claim MA12 MA13 --as <you>` for a set of epics. If it refuses, don't work around it.
 - **Work {owner} asks you for directly** can start from Backlog. Add it with `kb add` if it isn't on the board, then claim it with {owner}'s words: `kb claim MA12 --as <you> --asked "<what {owner} said>"`. Quote them; don't paraphrase a yes out of a maybe. {owner} sees it in the Inbox and can stop it. Never use `--asked` for work you only noticed.
 - **Write the testing plan before you build.** Right after claiming, run `kb test-plan <id>` and fill in the checks: what you'll verify, how, and what you expect. It goes in the epic's plan doc if it has one.

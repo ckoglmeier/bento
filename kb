@@ -957,7 +957,8 @@ def why_not_ready(board, card, who=None):
     if card.get("blocked"):
         return "blocked: " + card.get("blocked")
     column_of = {c.id: s.name.lower() for s, c in board.all_cards()}
-    waiting = [n for n in card.numbers("needs") if column_of.get(n, "done") != "done"]
+    # Epics waiting in Review count as built: work can go on, flagged as resting on unaccepted work.
+    waiting = [n for n in card.numbers("needs") if column_of.get(n, "done") not in ("done", "review")]
     if waiting:
         return "waiting on " + ", ".join("%s" % n for n in waiting)
     building = [n for n in card.numbers("verifies") if column_of.get(n, "done") not in ("review", "done")]
@@ -966,6 +967,29 @@ def why_not_ready(board, card, who=None):
     target = (card.get("for") or "any").lower()
     if who and target not in ("any", who.lower()):
         return "for " + target
+    return None
+
+
+def review_needs(board, card):
+    """The epics this one needs that are finished but not yet accepted."""
+    column_of = {c.id: s.name.lower() for s, c in board.all_cards()}
+    return [n for n in card.numbers("needs") if column_of.get(n) == "review"]
+
+
+def unaccepted_status(board, card):
+    """Why a claimed epic still rests on work the owner hasn't accepted, or None.
+    A need that was accepted stops mattering; one sent back is flagged harder."""
+    ids = card.numbers("builds on review")
+    if not ids:
+        return None
+    column_of = {c.id: s.name.lower() for s, c in board.all_cards()}
+    sent_back = [n for n in ids if column_of.get(n) not in ("review", "done", None)]
+    waiting = [n for n in ids if column_of.get(n) == "review"]
+    names = lambda ns: ", ".join("%s" % n for n in ns)
+    if sent_back:
+        return "%s was sent back from Review, so this may need redoing" % names(sent_back)
+    if waiting:
+        return "Builds on %s, still waiting in Review" % names(waiting)
     return None
 
 
@@ -1170,6 +1194,7 @@ def board_json(board):
 INBOX_SECTIONS = {
     "blocked": "Blocked until you answer",
     "asked": "Started on your word",
+    "unaccepted": "Work built on unaccepted epics",
     "plans": "Plans to approve",
     "review": "Finished work to accept",
     "changed": "Done-whens an agent changed",
@@ -1234,6 +1259,8 @@ def inbox_sections_for(section, card, me):
         hits.append("asked")
     if column == "review":
         hits.append("review")
+    if card.get("builds on review") and column != "done":
+        hits.append("unaccepted")
     if card.get("done when changed"):
         hits.append("changed")
     if column == "next" and not card.get("done when"):
@@ -1275,6 +1302,8 @@ def inbox(board, config=None, project=None):
         if project and card.get("project") != project and not (section.name.lower() == "scratchpad" and not card.get("project")):
             continue
         hits = [k for k in order if k in inbox_sections_for(section, card, me)]
+        if "unaccepted" in hits and not unaccepted_status(board, card):
+            hits.remove("unaccepted")
         if not hits:
             continue
         kind = hits[0]
@@ -1288,6 +1317,7 @@ def inbox(board, config=None, project=None):
                 (card.get("done when changed") or "").split(" ")[0], card.get("done when was") or "(none)"),
             "quiet": "No update from %s since %s" % ((card.get("claimed") or "?").split(" ")[0], quiet_since(card)),
             "asked": asked_words(card),
+            "unaccepted": unaccepted_status(board, card),
         }.get(kind)
         item = {
             "section": kind, "id": card.id, "ids": [card.id], "title": card.title, "column": section.name,
@@ -2016,6 +2046,10 @@ def cmd_claim(args):
                 raise KbError("Nothing in Next can be picked up by %s. Run: kb next --as %s" % (who, who))
             cards = [card]
         for card in cards:
+            early = review_needs(board, card)
+            if early:
+                card.set("builds on review", ", ".join("%s" % n for n in early))
+                card.note("claimed while %s waits in Review, so this builds on unaccepted work" % ", ".join("%s" % n for n in early), who)
             if asked and board.find(card.id)[0].name.lower() == "backlog":
                 card.note("claimed from Backlog on %s's word: \"%s\"" % (owner(), asked), who)
                 card.set("asked", "%s %s" % (who, today()))
@@ -2023,7 +2057,10 @@ def cmd_claim(args):
             move_card(board, card, "Doing")
             texts.append(card.markdown())
         untested = [c.id for c in cards if not test_plan(c)] if review_needs_tests() else []
+        flagged = [(c.id, c.get("builds on review")) for c in cards if c.get("builds on review")]
     print("Claimed by %s:\n\n%s" % (who, "\n\n".join(texts)))
+    for id, needs in flagged:
+        print("\n%s builds on %s, still in Review. %s sees that in the Inbox; if it is sent back, expect rework." % (id, needs, owner()))
     if untested:
         print("\nWrite the testing plan before you build: %s" % "; ".join("kb test-plan %s" % i for i in untested))
 

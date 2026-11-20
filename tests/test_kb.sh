@@ -368,7 +368,7 @@ check "unknown inbox section refused" "$("$KB" inbox --order review,nope 2>&1)" 
 check "a card shows in the higher section" "$(section_of $IN)" "['yours']"
 "$KB" inbox --order done-when,yours >/dev/null
 check "and moves when the order changes" "$(section_of $IN)" "['done-when']"
-check "inbox order resets" "$("$KB" inbox --reset)" "blocked, asked, plans, review, changed, done-when, quiet, yours, milestones, scratchpad"
+check "inbox order resets" "$("$KB" inbox --reset)" "blocked, asked, unaccepted, plans, review, changed, done-when, quiet, yours, milestones, scratchpad"
 check "board data has the inbox" "$(curl -s $U/api/board)" '"inbox_order"'
 check "answer clears a block" "$(code -H "$J" -d "{\"id\":\"$IB\",\"text\":\"Postgres\"}" $U/api/answer)" "200"
 check "answer is noted as a decision" "$("$KB" show $IB)" "answered (D1): Postgres"
@@ -494,7 +494,7 @@ python3 - "$BENTO_HOME/bento.json" <<'PY'
 import json, sys
 c = json.load(open(sys.argv[1])); c["inbox"] = ["review", "blocked"]; c.pop("inbox_seen", None); json.dump(c, open(sys.argv[1], "w"))
 PY
-check "new sections join an old saved order" "$("$KB" inbox --json | python3 -c "import json,sys; print(json.load(sys.stdin)['order'])")" "['review', 'changed', 'quiet', 'blocked', 'asked']"
+check "new sections join an old saved order" "$("$KB" inbox --json | python3 -c "import json,sys; print(json.load(sys.stdin)['order'])")" "['review', 'changed', 'quiet', 'blocked', 'asked', 'unaccepted']"
 "$KB" inbox --reset >/dev/null
 
 # Testing before review.
@@ -615,6 +615,35 @@ check "moved card keeps its old number as an alias" "$("$KB" show W4)" "Signup"
 check "taken numbers aren't reused" "$("$KB" add "Next one" -p web)" "Added W5"
 check "no project numbers with N" "$("$KB" add "Loose" --to scratchpad)" "Added N1"
 export BENTO_HOME="$SAVED_HOME"
+
+# Building past epics waiting in Review.
+RA=$("$KB" add "Base work" -p rv --to next --done-when base | newid)
+RB=$("$KB" add "Needs base" -p rv --to next --done-when b --needs $RA | newid)
+RC=$("$KB" add "Asked, needs base" -p rv --done-when c --needs $RA | newid)
+check "need in Next refuses" "$("$KB" claim $RB --as codex --also 2>&1)" "waiting on $RA"
+"$KB" claim $RA --as codex --also >/dev/null
+check "need in Doing refuses" "$("$KB" claim $RB --as codex --also 2>&1)" "waiting on $RA"
+check "need in Doing refuses --asked" "$("$KB" claim $RC --as codex --also --asked "go on" 2>&1)" "waiting on $RA"
+check "next doesn't offer it" "$("$KB" next --as codex -p rv 2>&1)" "$RB Needs base: waiting on $RA"
+"$KB" review $RA --as codex --untested "n/a" >/dev/null
+check "need in Review lets the claim through" "$("$KB" claim $RB --as codex --also)" "builds on $RA"
+check "claim is marked" "$("$KB" show $RB)" "builds on review: $RA"
+check "claim is noted" "$("$KB" show $RB)" "builds on unaccepted work"
+check "asked claim follows the rule" "$("$KB" claim $RC --as codex --also --asked "go on")" "Claimed by codex"
+check "asked claim is marked" "$("$KB" show $RC)" "builds on review: $RA"
+check "inbox shows unaccepted work" "$("$KB" inbox -p rv)" "Builds on $RA, still waiting in Review"
+check "inbox section exists in json" "$("$KB" inbox -p rv --json)" '"unaccepted"'
+check "web board data carries it" "$(curl -s $U/api/board)" "Builds on $RA, still waiting in Review"
+RD=$("$KB" add "Needs done base" -p rv --to next --done-when d --needs $RA | newid)
+"$KB" send-back $RA "redo it" >/dev/null
+check "sent back need refuses new claims" "$("$KB" claim $RD --as codex --also 2>&1)" "waiting on $RA"
+check "sent back flags dependents" "$("$KB" inbox -p rv)" "$RA was sent back from Review"
+"$KB" review $RA --as codex --untested "n/a" >/dev/null
+check "back in Review, plain flag again" "$("$KB" inbox -p rv)" "Builds on $RA, still waiting in Review"
+"$KB" move $RA done >/dev/null
+checkn "accepted need clears the flag" "$("$KB" inbox -p rv)" "Builds on"
+check "need in Done claims with no flag" "$("$KB" claim $RD --as codex --also | grep -c 'builds on review')" "0"
+check "rules explain it" "$("$KB" rules)" "Review or Done"
 
 # Every command is in the docs.
 for c in $("$KB" --help | sed -n '/^commands:/,$p' | grep -oE '^    [a-z-]+' | tr -d ' '); do
