@@ -22,6 +22,8 @@ import time
 import urllib.parse
 import urllib.request
 import webbrowser
+import xml.etree.ElementTree as ET
+import zipfile
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 POINTER = os.path.expanduser("~/.config/bento/home")
@@ -939,12 +941,453 @@ def watch_workspace():
                 last_snapshot = time.time()
                 snapshot_workspace()
             deliver_pending()
+            import_captures()
             stat = os.stat(board_path())
             stamp = (stat.st_mtime_ns, stat.st_size)
             if stamp != last:
                 last = stamp
                 Hub.bump()
         watch.wait(30)
+
+
+# ---- Performance ------------------------------------------------------------
+# How each published piece did, kept as dated snapshots so pieces can be compared at the
+# same age. One PERFORMANCE.md per project: a section per piece, with its fields and a
+# table of snapshots. Pieces link to the milestone they belong to.
+
+CHECKPOINTS = [0, 1, 3, 7, 14, 28]  # Days after publishing to take a snapshot.
+CHANNELS = ["linkedin", "substack", "announcement", "other"]
+
+
+def perf_path(project):
+    return os.path.join(home_dir(), "products", project, "PERFORMANCE.md")
+
+
+def read_perf(project):
+    """Every piece in a project's PERFORMANCE.md, in file order."""
+    path = perf_path(project)
+    if not os.path.exists(path):
+        return []
+    pieces, piece, header = [], None, None
+    with open(path, encoding="utf-8") as f:
+        for line in f.read().splitlines():
+            m = H2.match(line)
+            if m:
+                piece = {"title": m.group(1), "fields": {}, "rows": [], "project": project}
+                pieces.append(piece)
+                header = None
+                continue
+            if piece is None:
+                continue
+            field = FIELD.match(line)
+            if field and not header:
+                piece["fields"][field.group(1)] = field.group(2)
+            elif line.startswith("|"):
+                cells = [c.strip() for c in line.strip().strip("|").split("|")]
+                if header is None:
+                    header = [c.lower() for c in cells]
+                elif not TABLE_RULE.match(line.strip()):
+                    row = dict(zip(header, cells))
+                    piece["rows"].append({k: v for k, v in row.items() if v != ""})
+    return pieces
+
+
+def write_perf(project, pieces):
+    out = ["# Performance", "",
+           "Dated snapshots of how each piece did. Added and updated with kb perf; each table row is one reading.", ""]
+    for piece in pieces:
+        out.append("## %s" % piece["title"])
+        for key in ("channel", "url", "published", "milestone"):
+            if piece["fields"].get(key):
+                out.append("- %s: %s" % (key, piece["fields"][key]))
+        first = ["impressions", "engagements"]
+        found = {k for r in piece["rows"] for k in r if k not in ("date", "day")}
+        metrics = [m for m in first if m in found] + sorted(found - set(first))
+        if piece["rows"]:
+            out += ["", "| Date | Day | %s |" % " | ".join(metrics),
+                    "| --- | ---: | %s |" % " | ".join("---:" for _ in metrics)]
+            for r in sorted(piece["rows"], key=lambda r: r.get("date", "")):
+                out.append("| %s | %s | %s |" % (r.get("date", ""), r.get("day", ""), " | ".join(r.get(m, "") for m in metrics)))
+        out.append("")
+    os.makedirs(os.path.dirname(perf_path(project)), exist_ok=True)
+    atomic_write(perf_path(project), "\n".join(out))
+
+
+def all_pieces(project=None):
+    root = os.path.join(home_dir(), "products")
+    names = [project] if project else sorted(os.listdir(root)) if os.path.isdir(root) else []
+    return [p for name in names for p in read_perf(name)]
+
+
+def find_piece(pieces, key):
+    """A piece by its URL, its title, or a LinkedIn post number in its URL."""
+    key = key.strip()
+    post = re.search(r"(\d{15,})", key)
+    for p in pieces:
+        url = p["fields"].get("url", "")
+        if key in (url, p["title"]) or key.lower() == p["title"].lower() or (post and post.group(1) in url):
+            return p
+    return None
+
+
+def piece_day(piece, date):
+    published = piece["fields"].get("published")
+    if not published:
+        return ""
+    return str((datetime.date.fromisoformat(date) - datetime.date.fromisoformat(published)).days)
+
+
+def add_snapshot(piece, date, metrics):
+    """Record one reading. A second reading on the same day replaces the first."""
+    piece["rows"] = [r for r in piece["rows"] if r.get("date") != date]
+    row = {"date": date, "day": piece_day(piece, date)}
+    row.update({k: str(v) for k, v in metrics.items() if v is not None})
+    piece["rows"].append(row)
+
+
+def number(value):
+    text = str(value or "").replace(",", "").strip()
+    try:
+        return int(float(text))
+    except ValueError:
+        return None
+
+
+def parse_day(value):
+    """A date from an export: 2026-09-28, 9/28/2026, or an Excel serial number."""
+    text = str(value or "").strip()
+    with contextlib.suppress(ValueError):
+        return datetime.date.fromisoformat(text[:10]).isoformat()
+    with contextlib.suppress(ValueError):
+        return datetime.datetime.strptime(text, "%m/%d/%Y").date().isoformat()
+    with contextlib.suppress(ValueError):
+        return (datetime.date(1899, 12, 30) + datetime.timedelta(days=int(float(text)))).isoformat()
+    return None
+
+
+def xlsx_rows(path, sheet_name):
+    """Rows of one sheet as lists of cell text, read with the standard library only."""
+    ns = {"m": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+    rel_ns = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id"
+    with zipfile.ZipFile(path) as z:
+        strings = []
+        if "xl/sharedStrings.xml" in z.namelist():
+            for si in ET.fromstring(z.read("xl/sharedStrings.xml")).findall("m:si", ns):
+                strings.append("".join(n.text or "" for n in si.iter("{%s}t" % ns["m"])))
+        book = ET.fromstring(z.read("xl/workbook.xml"))
+        rels = ET.fromstring(z.read("xl/_rels/workbook.xml.rels"))
+        targets = {r.get("Id"): r.get("Target") for r in rels}
+        sheet = next((s for s in book.iter("{%s}sheet" % ns["m"]) if s.get("name", "").lower() == sheet_name.lower()), None)
+        if sheet is None:
+            raise KbError("No sheet called %s in %s." % (sheet_name, os.path.basename(path)))
+        target = targets[sheet.get(rel_ns)].lstrip("/")
+        target = target if target.startswith("xl/") else "xl/" + target
+        rows = []
+        for row in ET.fromstring(z.read(target)).iter("{%s}row" % ns["m"]):
+            cells = {}
+            for c in row.findall("m:c", ns):
+                col = re.match(r"[A-Z]+", c.get("r", "A")).group(0)
+                index = 0
+                for ch in col:
+                    index = index * 26 + ord(ch) - 64
+                v = c.find("m:v", ns)
+                text = "".join(n.text or "" for n in c.iter("{%s}t" % ns["m"])) if c.get("t") == "inlineStr" else (v.text if v is not None else "")
+                if c.get("t") == "s" and text:
+                    text = strings[int(text)]
+                cells[index - 1] = text or ""
+            rows.append([cells.get(i, "") for i in range(max(cells) + 1)] if cells else [])
+        return rows
+
+
+def linkedin_export(path):
+    """Posts from a LinkedIn analytics export (TOP POSTS): url, date and metrics."""
+    posts = {}
+    for row in xlsx_rows(path, "TOP POSTS"):
+        for url_col, date_col, metric_col, metric in ((0, 1, 2, "engagements"), (4, 5, 6, "impressions")):
+            url = row[url_col] if len(row) > url_col else ""
+            if not url.startswith("http"):
+                continue
+            post = posts.setdefault(url, {"url": url, "published": parse_day(row[date_col] if len(row) > date_col else "")})
+            post[metric] = number(row[metric_col] if len(row) > metric_col else None)
+    return list(posts.values())
+
+
+def csv_export(path):
+    """Posts from any CSV with a URL column, an optional date column, and number columns."""
+    import csv
+    with open(path, encoding="utf-8-sig", newline="") as f:
+        reader = csv.DictReader(f)
+        fields = reader.fieldnames or []
+        url_col = next((c for c in fields if c.strip().lower() in ("url", "link", "post url", "post link")), None)
+        if not url_col:
+            raise KbError("No URL column in %s. Name one url or link." % os.path.basename(path))
+        date_col = next((c for c in fields if c.strip().lower() in ("date", "published", "post date", "publish date", "sent")), None)
+        title_col = next((c for c in fields if c.strip().lower() in ("title", "post", "subject")), None)
+        posts = []
+        for row in reader:
+            post = {"url": (row.get(url_col) or "").strip(), "published": parse_day(row.get(date_col)) if date_col else None,
+                    "title": (row.get(title_col) or "").strip() if title_col else ""}
+            for col in fields:
+                if col not in (url_col, date_col, title_col) and number(row.get(col)) is not None:
+                    post[re.sub(r"[^a-z0-9]+", "-", col.strip().lower()).strip("-")] = number(row.get(col))
+            if post["url"]:
+                posts.append(post)
+        return posts
+
+
+def title_from_url(url):
+    m = re.search(r"/posts/[^_]+_(.+?)-(?:share|ugcPost|activity)-", url)
+    words = (m.group(1) if m else url.rstrip("/").rsplit("/", 1)[-1]).replace("-", " ").strip()
+    return (words[:1].upper() + words[1:]) if words else url
+
+
+def import_perf(project, path, kind, date, add_new):
+    """Take one reading for every post in an export. Returns (updated, added, skipped)."""
+    posts = linkedin_export(path) if kind == "linkedin" else csv_export(path)
+    pieces = read_perf(project)
+    updated = added = skipped = 0
+    for post in posts:
+        piece = find_piece(pieces, post["url"])
+        if not piece:
+            if not add_new:
+                skipped += 1
+                continue
+            title = post.get("title") or title_from_url(post["url"])
+            while any(p["title"] == title for p in pieces):
+                title += " (2)"
+            piece = {"title": title, "rows": [], "project": project, "fields": {
+                "channel": kind if kind in CHANNELS else "other", "url": post["url"], "published": post.get("published") or ""}}
+            pieces.append(piece)
+            added += 1
+        else:
+            updated += 1
+        metrics = {k: v for k, v in post.items() if k not in ("url", "published", "title")}
+        add_snapshot(piece, date, metrics)
+    write_perf(project, pieces)
+    return updated, added, skipped
+
+
+def value_at(piece, metric, day):
+    """The reading closest to a day after publishing, within a day either side of the checkpoint (wider later)."""
+    slack = max(1, day // 7)
+    best = None
+    for r in piece["rows"]:
+        d = number(r.get("day"))
+        v = number(r.get(metric))
+        if d is None or v is None or abs(d - day) > slack:
+            continue
+        if best is None or abs(d - day) < abs(best[0] - day):
+            best = (d, v)
+    return best
+
+
+def perf_due(pieces, on=None):
+    """Pieces that owe a snapshot today: a checkpoint has passed with no reading near it."""
+    on = on or today()
+    due = []
+    for p in pieces:
+        published = p["fields"].get("published")
+        if not published:
+            continue
+        age = (datetime.date.fromisoformat(on) - datetime.date.fromisoformat(published)).days
+        days = {number(r.get("day")) for r in p["rows"]}
+        missing = [c for c in CHECKPOINTS if c <= age and not any(d is not None and abs(d - c) <= max(1, c // 7) for d in days)]
+        if missing and age - missing[-1] <= max(1, missing[-1] // 7):
+            due.append((p, missing[-1]))
+    return due
+
+
+def cmd_perf(args):
+    project = args.project or detect_project()
+    if args.action in ("add", "log", "import") and not project:
+        raise KbError("Which project? Pass -p <project>.")
+    if args.action == "add":
+        if not args.title:
+            raise KbError("Name the piece: kb perf add \"title\" --url ...")
+        pieces = read_perf(project)
+        if find_piece(pieces, args.title) or (args.url and find_piece(pieces, args.url)):
+            raise KbError("That piece is already tracked.")
+        if args.published:
+            valid_date(args.published)
+        milestone = None
+        if args.milestone:
+            with locked() as board:
+                card = board.find(args.milestone)[1]
+                milestone = card.id
+                card.note("tracking performance of %s" % one_line(args.title), (args.who or owner()).lower())
+        pieces.append({"title": one_line(args.title), "rows": [], "project": project, "fields": {
+            "channel": args.channel, "url": args.url or "", "published": args.published or today(), "milestone": milestone or ""}})
+        write_perf(project, pieces)
+        print("Tracking %s. Take readings with: kb perf log \"%s\" impressions=... -p %s" % (args.title, args.title, project))
+        return
+    if args.action == "log":
+        pieces = read_perf(project)
+        piece = find_piece(pieces, args.title or "")
+        if not piece:
+            raise KbError("No piece called %s in %s. Run: kb perf -p %s" % (args.title, project, project))
+        metrics = {}
+        for pair in args.values:
+            key, _, value = pair.partition("=")
+            if number(value) is None or not key.strip():
+                raise KbError("Readings look like impressions=2503.")
+            metrics[re.sub(r"[^a-z0-9]+", "-", key.strip().lower()).strip("-")] = number(value)
+        add_snapshot(piece, valid_date(args.date) if args.date else today(), metrics)
+        write_perf(project, pieces)
+        print("Logged %s for %s." % (", ".join("%s %s" % kv for kv in metrics.items()), piece["title"]))
+        return
+    if args.action == "import":
+        if not args.title or not os.path.isfile(os.path.expanduser(args.title)):
+            raise KbError("Give the export file: kb perf import <file> --from linkedin|csv")
+        kind = args.source or ("linkedin" if args.title.lower().endswith(".xlsx") else "csv")
+        date = valid_date(args.date) if args.date else today()
+        updated, added, skipped = import_perf(project, os.path.expanduser(args.title), kind, date, args.add_new)
+        print("Readings for %s: %d updated, %d new%s." % (date, updated, added,
+              ", %d not tracked (add them with --add-new)" % skipped if skipped else ""))
+        return
+    pieces = all_pieces(project)
+    if args.milestone:
+        ref = resolve(args.milestone)
+        pieces = [p for p in pieces if p["fields"].get("milestone") == ref]
+    if args.action == "due":
+        due = perf_due(pieces)
+        for p, day in due:
+            print("%s  day %d reading due  [%s]" % (p["title"], day, p["project"]))
+        if not due:
+            print("No readings due.")
+        return
+    if args.json:
+        print(json.dumps(pieces, indent=2))
+        return
+    if not pieces:
+        print("No pieces tracked yet. Add one: kb perf add \"title\" --channel linkedin --url ... -p <project>")
+        return
+    metric = args.metric
+    day = args.at
+    rows = []
+    for p in pieces:
+        hit = value_at(p, metric, day)
+        rows.append((hit[1] if hit else None, p))
+    rows.sort(key=lambda r: (r[0] is None, -(r[0] or 0)))
+    print("%s at day %d" % (metric, day))
+    for value, p in rows:
+        f = p["fields"]
+        print("  %8s  %s  %s%s" % ("{:,}".format(value) if value is not None else "-", f.get("published") or "          ",
+                                  p["title"], "  (%s)" % f["milestone"] if f.get("milestone") else ""))
+
+
+# ---- Capture inbox ----------------------------------------------------------
+# Notes that start away from this Mac, such as a voice note or a ChatGPT summary on
+# the phone, land as text files in a folder iCloud Drive syncs. Bento files each one
+# as a Scratchpad note and moves the file to Imported. Nothing leaves the machine.
+
+ICLOUD = "~/Library/Mobile Documents/com~apple~CloudDocs"
+CAPTURE_NAME = "Bento Inbox"
+CAPTURE_SUFFIXES = (".txt", ".md", ".markdown")
+
+
+def capture_dir():
+    path = read_config().get("capture", {}).get("inbox")
+    return os.path.expanduser(path) if path else None
+
+
+def capture_note(text, projects):
+    """Title, body lines and project for one captured note."""
+    text = text.replace("\r\n", "\n").lstrip("\ufeff").strip()
+    text = re.sub(r"^\s*note for bento\b[\s:,.\-]*", "", text, flags=re.I).strip()
+    project = None
+    for tag in re.findall(r"(?<![\w#])#([a-z][a-z0-9-]*)", text, flags=re.I):
+        if tag.lower() in projects:
+            project = tag.lower()
+            text = re.sub(r"\s*#%s\b" % re.escape(tag), "", text, count=1).strip()
+            break
+    lines = [l.strip() for l in text.splitlines() if l.strip()]
+    if not lines:
+        return None
+    first = lines[0].lstrip("#").strip() or "Note"
+    title = first if len(first) <= 80 else first[:80].rsplit(" ", 1)[0] + "..."
+    body = lines[1:] if title == first else [first] + lines[1:]
+    # A body line can't start a column or card.
+    body = [re.sub(r"^#+\s*", "", l) for l in body]
+    return title, body, project
+
+
+def import_captures():
+    """File every note waiting in the capture folder. Returns the new card numbers."""
+    folder = capture_dir()
+    if not folder or not os.path.isdir(folder):
+        return []
+    names = sorted(n for n in os.listdir(folder)
+                   if n.lower().endswith(CAPTURE_SUFFIXES) and not n.startswith("."))
+    if not names:
+        return []
+    added, filed = [], []
+    with locked() as board:
+        projects = set(read_config().get("projects", {})) | {c.get("project") for _, c in board.all_cards() if c.get("project")}
+        for name in names:
+            path = os.path.join(folder, name)
+            try:
+                with open(path, encoding="utf-8") as f:
+                    note = capture_note(f.read(), projects)
+            except (OSError, UnicodeDecodeError):
+                continue  # Still syncing, or not text. Try again next time.
+            filed.append(name)
+            if not note:
+                continue
+            title, body, project = note
+            card = Card(board.next_id(project), title)
+            card.set("for", owner())
+            card.set("project", project)
+            card.set("captured", "%s from %s" % (today(), name))
+            if body:
+                card.lines += [""] + body
+            board.column("Scratchpad").cards.append(card)
+            added.append(card.id)
+    done = os.path.join(folder, "Imported")
+    os.makedirs(done, exist_ok=True)
+    for name in filed:
+        target = os.path.join(done, name)
+        stem, ext = os.path.splitext(name)
+        n = 1
+        while os.path.exists(target):
+            n += 1
+            target = os.path.join(done, "%s-%d%s" % (stem, n, ext))
+        with contextlib.suppress(OSError):
+            os.replace(os.path.join(folder, name), target)
+    return added
+
+
+SHORTCUT_STEPS = """To capture from your phone, make two Shortcuts in the Shortcuts app:
+
+Voice note
+  1. Dictate Text.
+  2. Save File: save the Dictated Text to iCloud Drive > %(name)s. Turn off Ask Where to Save.
+  Add it to the Home Screen or the Action Button, or say "Hey Siri, Voice note".
+
+Note from ChatGPT (or any app)
+  1. In the shortcut's details, turn on Show in Share Sheet, receiving Text.
+  2. Save File: save the Shortcut Input to iCloud Drive > %(name)s. Turn off Ask Where to Save.
+  In ChatGPT, say "note for bento" and ask for a short summary, then share or copy it into this shortcut.
+
+Put #project anywhere in a note to file it under that project. While Bento's board runs,
+notes arrive within a minute. Otherwise run: kb capture"""
+
+
+def cmd_capture(args):
+    if args.action == "setup":
+        folder = os.path.expanduser(args.folder or os.path.join(ICLOUD, CAPTURE_NAME))
+        if not args.folder and not os.path.isdir(os.path.expanduser(ICLOUD)):
+            raise KbError("iCloud Drive isn't on this Mac. Pick a synced folder: kb capture setup --folder <path>")
+        os.makedirs(folder, exist_ok=True)
+        config = read_config()
+        config.setdefault("capture", {})["inbox"] = folder
+        write_config(config)
+        print("Notes saved to %s become Scratchpad notes.\n" % folder)
+        print(SHORTCUT_STEPS % {"name": os.path.basename(folder.rstrip("/"))})
+        return
+    if not capture_dir():
+        raise KbError("No capture folder yet. Run: kb capture setup")
+    added = import_captures()
+    print("Filed %s in the Scratchpad." % ", ".join(added) if added else "No new notes in %s." % capture_dir())
 
 
 # ---- Picking work -----------------------------------------------------------
@@ -1824,16 +2267,19 @@ def digest(board, project=None):
 def resume(board, who, project=None):
     """Where an agent stands at the start of a session, and what to do next."""
     me = owner().lower()
+    # What you hold shows from any folder; work waiting for you is limited to this project.
     mine = [(s, c) for s, c in board.all_cards()
-            if (not project or c.get("project") == project)
-            and ((s.name.lower() == "doing" and (c.get("claimed") or "").split(" ")[0].lower() == who)
-                 or (s.name.lower() == "next" and (c.get("for") or "").lower() == who))]
+            if (s.name.lower() == "doing" and (c.get("claimed") or "").split(" ")[0].lower() == who)
+            or (s.name.lower() == "next" and (c.get("for") or "").lower() == who
+                and (not project or c.get("project") == project))]
     out = []
+    mine.sort(key=lambda sc: bool(project) and sc[1].get("project") != project)  # This project first.
     held = [c for s, c in mine if s.name.lower() == "doing"]
     if held:
         out.append("You hold:")
         for c in held:
-            out.append("  %s %s (claimed %s)%s" % (c.id, c.title, (c.get("claimed") or "").split(" ")[-1], "  BLOCKED: " + c.get("blocked") if c.get("blocked") else ""))
+            elsewhere = "  [%s]" % c.get("project") if project and c.get("project") != project else ""
+            out.append("  %s %s%s (claimed %s)%s" % (c.id, c.title, elsewhere, (c.get("claimed") or "").split(" ")[-1], "  BLOCKED: " + c.get("blocked") if c.get("blocked") else ""))
             if c.get("done when"):
                 out.append("    Done when: %s" % c.get("done when"))
             if c.get("plan"):
@@ -3439,6 +3885,28 @@ def build_parser():
     p.add_argument("--project", "-p", help="show one project")
     p.add_argument("--json", action="store_true", help="output JSON")
     p.set_defaults(func=cmd_calendar)
+
+    p = sub.add_parser("perf", parents=[who], help="how published pieces did, compared at the same age")
+    p.add_argument("action", nargs="?", choices=["list", "add", "log", "import", "due"], default="list")
+    p.add_argument("title", nargs="?", help="the piece (or, for import, the export file)")
+    p.add_argument("values", nargs="*", help="readings for log, like impressions=2503 engagements=96")
+    p.add_argument("--project", "-p")
+    p.add_argument("--channel", choices=CHANNELS, default="linkedin")
+    p.add_argument("--url")
+    p.add_argument("--published", help="publish date (default: today)")
+    p.add_argument("--milestone", "-m", help="the milestone this piece belongs to, such as W2")
+    p.add_argument("--date", help="when the reading was taken (default: today)")
+    p.add_argument("--from", dest="source", choices=["linkedin", "csv"], help="export type (default: by file type)")
+    p.add_argument("--add-new", action="store_true", help="track posts in the export that aren't tracked yet")
+    p.add_argument("--metric", default="impressions", help="what to compare (default: impressions)")
+    p.add_argument("--at", type=int, default=7, help="compare at this many days after publishing (default: 7)")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_perf)
+
+    p = sub.add_parser("capture", help="file notes from the phone or ChatGPT, saved to a synced folder")
+    p.add_argument("action", nargs="?", choices=["import", "setup"], default="import")
+    p.add_argument("--folder", help="the folder to watch (default: iCloud Drive/%s)" % CAPTURE_NAME)
+    p.set_defaults(func=cmd_capture)
 
     p = sub.add_parser("report", help="track daily reports and where they arrive")
     p.add_argument("action", choices=["list", "add", "post", "show", "rm"])

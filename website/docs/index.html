@@ -196,6 +196,12 @@ kb handoff MA12 MA13 --to claude --plan products/my-app/plans/implementation-sea
 <pre><code>kb report add "App daily usage" --thread &lt;codex-thread-id&gt; -p my-app --schedule "Daily at 2:00"</code></pre>
     <p>The Reports panel on the board links to each report's thread, filtered by project. A report job can also post a dated copy with <code>kb report post "App daily usage" report.md</code>, which keeps its history in <code>products/my-app/reports/</code> where people and agents can read it.</p>
 
+    <h2 id="capture">Notes from your phone</h2>
+    <p>Notes can start away from your Mac. Run <code>kb capture setup</code> once. It makes a folder called Bento Inbox in iCloud Drive and prints the steps for two Shortcuts on your phone: one records a voice note and saves what you said, and the other takes text from the share sheet, so you can send it a ChatGPT summary after saying "note for bento" there. Each file saved to the folder becomes a Scratchpad note within a minute while the board runs, or when you run <code>kb capture</code>. The first line is the title. Put <code>#project</code> anywhere in a note to file it under that project. Imported files move to an Imported folder rather than being deleted. Nothing goes through a server: iCloud syncs the folder and Bento reads it.</p>
+
+    <h2 id="performance">How pieces performed</h2>
+    <p>Each project can keep a <code>PERFORMANCE.md</code>: one section for each published piece, such as a post, an essay or an announcement, with a table of dated readings. Track one with <code>kb perf add "Launch post" --channel linkedin --url ... --published 2026-11-12 -m W2 -p writing</code>, where <code>-m</code> links it to its milestone. Log a reading with <code>kb perf log "Launch post" impressions=2503 engagements=96</code>, or take readings for many pieces at once from an export: <code>kb perf import linkedin-export.xlsx</code> reads LinkedIn's analytics file, and any CSV with a URL column works too. Add <code>--add-new</code> to start tracking posts the export lists. Readings are worth most at the same age, so <code>kb perf due</code> lists pieces that are due a reading on day 0, 1, 3, 7, 14 or 28, and <code>kb perf --metric engagements --at 7</code> compares every piece a week in.</p>
+
     <h2 id="commands">Commands</h2>
     <p><code>kb --help</code> lists everything. These are the ones you'll use most:</p>
 <pre><code>kb                               the board across projects (-p my-app, --kind testing, --all, --json; same as kb list)
@@ -223,6 +229,8 @@ kb review MA12 --as codex --tested "what ran, what passed" --note "text" --link 
 kb send-back MA12 "text" --reason mismatch   send Review work back (broken, unclear, missing, other)
 kb bar MA12 keep                 keep an agent's done-when change (or: undo)
 kb ship MA14                     mark a milestone reached; unfinished epics move on
+kb capture                       file notes saved to the synced inbox folder (setup makes the folder)
+kb perf                          how pieces did at the same age (add, log, import, due; --at 7)
 kb health                        everything stuck, since when, and who's next
 kb digest                        a Markdown briefing, secrets removed (--out file --watch)
 kb resume --as claude            start of a session: what you hold and what came back

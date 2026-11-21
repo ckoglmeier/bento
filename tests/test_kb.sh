@@ -453,6 +453,11 @@ check "resume shows what came back" "$("$KB" resume --as claude -p pm)" "sent ba
 check "resume shows decisions" "$("$KB" resume --as claude -p pm)" "D4"
 check "resume says what to do" "$("$KB" resume --as claude -p pm)" "Next step: Read what came back on $P1"
 check "resume needs a name" "$("$KB" resume 2>&1)" "Say who you are"
+OTHER=$("$KB" add "Elsewhere" -p pm2 --to next --done-when x | newid); "$KB" claim $OTHER --as claude --also >/dev/null
+check "resume shows held work from other projects" "$("$KB" resume --as claude -p pm)" "$OTHER Elsewhere  [pm2]"
+check "this project's work comes first" "$("$KB" resume --as claude -p pm | sed -n 2p)" "$P1"
+checkn "resume never says nothing to do while holding work" "$("$KB" resume --as claude -p empty-project)" "Nothing to pick up"
+"$KB" move $OTHER backlog >/dev/null; "$KB" set $OTHER claimed >/dev/null
 "$KB" note $P1 "Fixed the receipt email." --as claude >/dev/null
 check "a reply clears what came back" "$("$KB" resume --as claude -p pm)" "Next step: Carry on with $P1"
 "$KB" set $P1 claimed "claude 2026-01-02" >/dev/null; sed -i '' "s/^- $(date +%F) /- 2026-01-02 /" "$BENTO_HOME/BOARD.md"
@@ -644,6 +649,72 @@ check "back in Review, plain flag again" "$("$KB" inbox -p rv)" "Builds on $RA, 
 checkn "accepted need clears the flag" "$("$KB" inbox -p rv)" "Builds on"
 check "need in Done claims with no flag" "$("$KB" claim $RD --as codex --also | grep -c 'builds on review')" "0"
 check "rules explain it" "$("$KB" rules)" "Review or Done"
+
+# Capture: notes from the phone or ChatGPT arrive through a synced folder.
+check "capture needs setup" "$("$KB" capture 2>&1)" "kb capture setup"
+CAP="$T/Bento Inbox"
+check "capture setup" "$("$KB" capture setup --folder "$CAP")" "Voice note"
+printf 'Note for bento: call the printer about proofs\nThey close at 5.\n## not a heading\n' > "$CAP/one.txt"
+printf 'Pricing idea for #pm\n' > "$CAP/two.md"
+printf '\n\n' > "$CAP/empty.txt"
+printf 'not yet' > "$CAP/.three.txt"; printf 'x' > "$CAP/four.txt.icloud"
+OUT=$("$KB" capture)
+check "capture files notes" "$OUT" "Filed N"
+check "title from the first line, without the trigger" "$("$KB" --all)" "call the printer about proofs"
+check "a #project tag files it there" "$("$KB" --all -p pm)" "Pricing idea"
+SHOWN=$("$KB" --json | python3 -c "import json,sys; d=json.load(sys.stdin); print([c for x in d['columns'] for c in x['cards'] if c['title']=='call the printer about proofs'][0]['id'])")
+check "body kept, headings defused" "$("$KB" show $SHOWN)" "They close at 5."
+checkn "no stray heading" "$(cat "$BENTO_HOME/BOARD.md")" "## not a heading"
+check "it's the owner's note" "$("$KB" show $SHOWN)" "for: sam"
+check "files move to Imported" "$(ls "$CAP/Imported")" "one.txt"
+check "empty notes are cleared, not filed" "$(ls "$CAP/Imported")" "empty.txt"
+check "hidden and undownloaded files wait" "$(ls -a "$CAP")" "four.txt.icloud"
+check "nothing new" "$("$KB" capture)" "No new notes"
+printf 'Again\n' > "$CAP/one.txt"; "$KB" capture >/dev/null
+check "a repeated name doesn't overwrite" "$(ls "$CAP/Imported")" "one-2.txt"
+printf 'From the board\n' > "$CAP/five.txt"; "$KB" note $SHOWN "nudge" >/dev/null; sleep 1.5
+check "the running board files notes by itself" "$("$KB" --all)" "From the board"
+
+# Performance of published pieces.
+PM=$("$KB" add "Essay week" -p pm --kind milestone --target 2027-03-01 | newid)
+check "perf starts empty" "$("$KB" perf -p pm)" "No pieces tracked"
+check "perf add" "$("$KB" perf add "Launch post" --channel linkedin --url https://www.linkedin.com/posts/x_launch-post-share-7500000000000000001-ab --published 2026-11-01 -m $PM -p pm)" "Tracking Launch post"
+check "milestone hears about it" "$("$KB" show $PM)" "tracking performance of Launch post"
+check "perf add refuses a repeat" "$("$KB" perf add "Launch post" -p pm 2>&1)" "already tracked"
+check "perf log" "$("$KB" perf log "Launch post" impressions=1,200 engagements=30 --date 2026-11-08 -p pm)" "impressions 1200"
+check "readings carry their age" "$(cat "$BENTO_HOME/products/pm/PERFORMANCE.md")" "| 2026-11-08 | 7 | 1200 | 30 |"
+check "bad reading refused" "$("$KB" perf log "Launch post" impressions=lots -p pm 2>&1)" "look like impressions=2503"
+python3 - "$T/li.xlsx" <<'PYX'
+import sys, zipfile
+rows = [["Top posts"], [], ["Post URL", "Post publish date", "Engagements", "", "Post URL", "Post publish date", "Impressions"],
+        ["https://www.linkedin.com/posts/x_launch-post-share-7500000000000000001-ab", "11/1/2026", "41", "", "https://www.linkedin.com/posts/x_launch-post-share-7500000000000000001-ab", "11/1/2026", "2,000"],
+        ["https://www.linkedin.com/posts/x_second-thing-share-7500000000000000002-cd", "11/4/2026", "5", "", "https://www.linkedin.com/posts/x_second-thing-share-7500000000000000002-cd", "11/4/2026", "800"]]
+def cell(r, c, v):
+    ref = "ABCDEFG"[c] + str(r)
+    return '<c r="%s" t="inlineStr"><is><t>%s</t></is></c>' % (ref, v) if v else ""
+sheet = '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>%s</sheetData></worksheet>' % "".join(
+    '<row r="%d">%s</row>' % (i + 1, "".join(cell(i + 1, j, v) for j, v in enumerate(r))) for i, r in enumerate(rows))
+z = zipfile.ZipFile(sys.argv[1], "w")
+z.writestr("xl/workbook.xml", '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="DISCOVERY" sheetId="1" r:id="rId1"/><sheet name="TOP POSTS" sheetId="2" r:id="rId2"/></sheets></workbook>')
+z.writestr("xl/_rels/workbook.xml.rels", '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Target="worksheets/sheet2.xml"/></Relationships>')
+z.writestr("xl/worksheets/sheet1.xml", '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData/></worksheet>')
+z.writestr("xl/worksheets/sheet2.xml", sheet)
+z.close()
+PYX
+check "linkedin import updates tracked posts" "$("$KB" perf import "$T/li.xlsx" --date 2026-11-08 -p pm)" "1 updated, 0 new, 1 not tracked"
+check "same-day reading replaced" "$(cat "$BENTO_HOME/products/pm/PERFORMANCE.md")" "| 2026-11-08 | 7 | 2000 | 41 |"
+checkn "no duplicate reading" "$(cat "$BENTO_HOME/products/pm/PERFORMANCE.md")" "| 1200 |"
+check "add-new tracks the rest" "$("$KB" perf import "$T/li.xlsx" --date 2026-11-11 --add-new -p pm)" "1 updated, 1 new"
+check "new piece titled from its URL" "$("$KB" perf -p pm --at 7)" "Second thing"
+check "compare at the same age" "$("$KB" perf -p pm --at 7 | sed -n 2p)" "2,000  2026-11-01  Launch post  ($PM)"
+check "compare another metric" "$("$KB" perf -p pm --metric engagements --at 7)" "engagements at day 7"
+check "filter by milestone" "$("$KB" perf -m $PM -p pm)" "Launch post"
+checkn "filter by milestone 2" "$("$KB" perf -m $PM -p pm)" "Second thing"
+printf 'title,url,date,opens,clicks\nMy essay,https://x.substack.com/p/my-essay,2026-11-02,500,40\n' > "$T/sub.csv"
+check "csv import" "$("$KB" perf import "$T/sub.csv" --add-new --date 2026-11-09 -p pm)" "1 new"
+check "csv keeps its metrics" "$("$KB" perf -p pm --metric opens --at 7)" "500"
+check "csv needs a url column" "$(printf 'a,b\n1,2\n' > "$T/bad.csv"; "$KB" perf import "$T/bad.csv" -p pm 2>&1)" "No URL column"
+check "due lists missing checkpoints" "$("$KB" perf due -p pm)" "reading due"
 
 # Every command is in the docs.
 for c in $("$KB" --help | sed -n '/^commands:/,$p' | grep -oE '^    [a-z-]+' | tr -d ' '); do

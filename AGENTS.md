@@ -120,6 +120,8 @@ kb block MA12 "reason"           flag a card as stuck (kb unblock MA12 clears it
 kb resume --as codex             what you hold, what came back, what to do next
 kb why MA12                      the decisions behind a card
 kb decide "text" --implies MA12  record a decision {owner} made
+kb capture                       file notes saved to the synced inbox folder
+kb perf due                      published pieces due a performance reading
 kb health                        everything stuck, since when, and who's next
 kb digest                        a short Markdown briefing of the board
 kb test-plan MA12                start the epic's testing plan, before you build
